@@ -708,5 +708,43 @@ class L10n: ObservableObject {
             "sv": "Ny flik", "pl": "Nowa karta",
             "ko": "새 탭", "tr": "Yeni sekme"])
     }
+    
+    // MARK: - Visual Keyboard
+    var visualKeyboard: String {
+        tr(["en": "Visual Keyboard", "hu": "Vizuális billentyűzet",
+            "de": "Visuelle Tastatur", "fr": "Clavier visuel",
+            "es": "Teclado visual", "it": "Tastiera visiva",
+            "ja": "ビジュアルキーボード", "zh": "可视化键盘",
+            "nl": "Visueel toetsenbord", "pt": "Teclado visual",
+            "sv": "Visuellt tangentbord", "pl": "Wizualna klawiatura",
+            "ko": "시각적 키보드", "tr": "Görsel klavye"])
+    }
+    var showKeyboard: String {
+        tr(["en": "Show Keyboard", "hu": "Billentyűzet mutatása",
+            "de": "Tastatur anzeigen", "fr": "Afficher le clavier",
+            "es": "Mostrar teclado", "it": "Mostra tastiera",
+            "ja": "キーボードを表示", "zh": "显示键盘",
+            "nl": "Toon toetsenbord", "pt": "Mostrar teclado",
+            "sv": "Visa tangentbord", "pl": "Pokaż klawiaturę",
+            "ko": "키보드 표시", "tr": "Klavyeyi göster"])
+    }
+    var hideKeyboard: String {
+        tr(["en": "Hide Keyboard", "hu": "Billentyűzet elrejtése",
+            "de": "Tastatur ausblenden", "fr": "Masquer le clavier",
+            "es": "Ocultar teclado", "it": "Nascondi tastiera",
+            "ja": "キーボードを非表示", "zh": "隐藏键盘",
+            "nl": "Verberg toetsenbord", "pt": "Ocultar teclado",
+            "sv": "Dölj tangentbord", "pl": "Ukryj klawiaturę",
+            "ko": "키보드 숨기기", "tr": "Klavyeyi gizle"])
+    }
+    var clickToSelect: String {
+        tr(["en": "Click a key to select it", "hu": "Kattints egy billentyűre a kiválasztásához",
+            "de": "Klicken Sie auf eine Taste", "fr": "Cliquez sur une touche",
+            "es": "Haz clic en una tecla", "it": "Clicca su un tasto",
+            "ja": "キーをクリックして選択", "zh": "点击按键选择",
+            "nl": "Klik op een toets", "pt": "Clique em uma tecla",
+            "sv": "Klicka på en tangent", "pl": "Kliknij klawisz",
+            "ko": "키를 클릭하여 선택", "tr": "Bir tuşa tıklayın"])
+    }
 }
 

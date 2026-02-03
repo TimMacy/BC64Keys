@@ -15,6 +15,11 @@ import ServiceManagement
 //   - blocks them (discard), or
 //   - emits a replacement CGEvent (remap)
 //
+// v1.7.0 Features:
+// - Visual Keyboard: Interactive on-screen keyboard for selecting target keys
+// - Unicode Character Support: Send actual characters via keyboardSetUnicodeString()
+// - Improved modifier handling for Cmd+Key → Plain Key mappings
+//
 // Privacy note:
 // - This app needs Accessibility permission to observe/modify keystrokes globally.
 // - Keep logging conservative; anything written to stdout or /tmp can be readable by other local processes.
@@ -733,6 +738,139 @@ extension NavigationAction {
     ]
 }
 
+// MARK: - Visual Keyboard View
+/// Interactive visual keyboard for selecting target keys
+/// Makes it easy to find special characters like [], $, etc.
+struct VisualKeyboardView: View {
+    @Binding var selectedKeyCode: UInt16
+    @Binding var selectedKeyName: String
+    @Binding var selectedCharacter: String?
+    var onKeySelected: (() -> Void)?
+    
+    // Compact Mac keyboard layout - each row is an array of (keyCode, display, character, width)
+    // Character is what we'll send as Unicode (nil for special keys that should use keyCode)
+    private let keyboardLayout: [[(UInt16, String, String?, CGFloat)]] = [
+        // Row 1: Numbers row with esc and backspace
+        [(53, "⎋", nil, 1.0), (50, "`", "`", 1.0), (18, "1", "1", 1.0), (19, "2", "2", 1.0), (20, "3", "3", 1.0), (21, "4", "4", 1.0),
+         (23, "5", "5", 1.0), (22, "6", "6", 1.0), (26, "7", "7", 1.0), (28, "8", "8", 1.0), (25, "9", "9", 1.0),
+         (29, "0", "0", 1.0), (27, "-", "-", 1.0), (24, "=", "=", 1.0), (51, "⌫", nil, 1.3)],
+        
+        // Row 2: QWERTY row
+        [(48, "⇥", nil, 1.3), (12, "Q", "q", 1.0), (13, "W", "w", 1.0), (14, "E", "e", 1.0), (15, "R", "r", 1.0),
+         (17, "T", "t", 1.0), (16, "Y", "y", 1.0), (32, "U", "u", 1.0), (34, "I", "i", 1.0), (31, "O", "o", 1.0),
+         (35, "P", "p", 1.0), (33, "[", "[", 1.0), (30, "]", "]", 1.0), (42, "\\", "\\", 1.3)],
+        
+        // Row 3: ASDF row
+        [(57, "⇪", nil, 1.5), (0, "A", "a", 1.0), (1, "S", "s", 1.0), (2, "D", "d", 1.0), (3, "F", "f", 1.0),
+         (5, "G", "g", 1.0), (4, "H", "h", 1.0), (38, "J", "j", 1.0), (40, "K", "k", 1.0), (37, "L", "l", 1.0),
+         (41, ";", ";", 1.0), (39, "'", "'", 1.0), (36, "↵", nil, 1.8)],
+        
+        // Row 4: ZXCV row
+        [(56, "⇧", nil, 1.8), (6, "Z", "z", 1.0), (7, "X", "x", 1.0), (8, "C", "c", 1.0), (9, "V", "v", 1.0),
+         (11, "B", "b", 1.0), (45, "N", "n", 1.0), (46, "M", "m", 1.0), (43, ",", ",", 1.0), (47, ".", ".", 1.0),
+         (44, "/", "/", 1.0), (60, "⇧", nil, 1.5), (126, "↑", nil, 1.0)],
+        
+        // Row 5: Bottom row - modifiers, space, arrows
+        [(63, "fn", nil, 1.0), (59, "⌃", nil, 1.0), (58, "⌥", nil, 1.0), (55, "⌘", nil, 1.2),
+         (49, "␣", " ", 4.0),
+         (54, "⌘", nil, 1.2), (61, "⌥", nil, 1.0), (123, "←", nil, 1.0), (125, "↓", nil, 1.0), (124, "→", nil, 1.0)]
+    ]
+    
+    // Function keys row (separate) - no character, use keyCode
+    private let functionKeys: [(UInt16, String)] = [
+        (122, "F1"), (120, "F2"), (99, "F3"), (118, "F4"),
+        (96, "F5"), (97, "F6"), (98, "F7"), (100, "F8"),
+        (101, "F9"), (109, "F10"), (103, "F11"), (111, "F12")
+    ]
+    
+    // Navigation keys - no character, use keyCode
+    private let navKeys: [(UInt16, String)] = [
+        (117, "⌦"), (115, "↖"), (119, "↘"), (116, "⇞"), (121, "⇟")
+    ]
+    
+    private let keySize: CGFloat = 26
+    
+    var body: some View {
+        VStack(spacing: 2) {
+            // Function keys row
+            HStack(spacing: 2) {
+                ForEach(functionKeys, id: \.0) { key in
+                    CompactKeyButton(keyCode: key.0, label: key.1, width: 1.0, size: keySize,
+                                    isSelected: selectedKeyCode == key.0) {
+                        selectKey(keyCode: key.0, name: key.1, character: nil)
+                    }
+                }
+                Spacer()
+                // Nav keys inline
+                ForEach(navKeys, id: \.0) { key in
+                    CompactKeyButton(keyCode: key.0, label: key.1, width: 1.0, size: keySize,
+                                    isSelected: selectedKeyCode == key.0) {
+                        selectKey(keyCode: key.0, name: key.1, character: nil)
+                    }
+                }
+            }
+            
+            Divider().padding(.vertical, 2)
+            
+            // Main keyboard rows
+            ForEach(0..<keyboardLayout.count, id: \.self) { rowIndex in
+                HStack(spacing: 2) {
+                    ForEach(0..<keyboardLayout[rowIndex].count, id: \.self) { keyIndex in
+                        let key = keyboardLayout[rowIndex][keyIndex]
+                        CompactKeyButton(keyCode: key.0, label: key.1, width: key.3, size: keySize,
+                                        isSelected: selectedKeyCode == key.0) {
+                            selectKey(keyCode: key.0, name: key.1, character: key.2)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(8)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+        .cornerRadius(8)
+    }
+    
+    private func selectKey(keyCode: UInt16, name: String, character: String?) {
+        selectedKeyCode = keyCode
+        selectedCharacter = character
+        if let specialName = kSpecialKeys[keyCode] {
+            selectedKeyName = specialName
+        } else {
+            selectedKeyName = name.uppercased()
+        }
+        onKeySelected?()
+    }
+}
+
+// MARK: - Compact Key Button
+struct CompactKeyButton: View {
+    let keyCode: UInt16
+    let label: String
+    let width: CGFloat
+    let size: CGFloat
+    let isSelected: Bool
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: label.count > 2 ? 8 : 10, weight: .medium, design: .rounded))
+                .frame(width: size * width - 2, height: size - 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(isSelected ? Color.blue : Color(NSColor.controlBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(isSelected ? Color.blue : Color.gray.opacity(0.3), lineWidth: 0.5)
+                )
+                .foregroundColor(isSelected ? .white : .primary)
+        }
+        .buttonStyle(.plain)
+        .help("Key code: \(keyCode)")
+    }
+}
+
 struct KeyMappingRule: Identifiable, Codable {
     var id: UUID
     var type: MappingType
@@ -742,6 +880,7 @@ struct KeyMappingRule: Identifiable, Codable {
     var targetKeyCode: UInt16
     var targetKeyName: String
     var targetModifiers: CGEventFlags? // For navigation actions
+    var targetCharacter: String? // Unicode character to send (from visual keyboard)
     var isEnabled: Bool
     
     // Per-app filtering
@@ -750,7 +889,7 @@ struct KeyMappingRule: Identifiable, Codable {
     
     init(id: UUID = UUID(), type: MappingType, sourceKeyCode: UInt16, sourceKeyName: String,
          sourceModifiers: CGEventFlags? = nil, targetKeyCode: UInt16, targetKeyName: String, 
-         targetModifiers: CGEventFlags? = nil, isEnabled: Bool = true,
+         targetModifiers: CGEventFlags? = nil, targetCharacter: String? = nil, isEnabled: Bool = true,
          appFilterMode: AppFilterMode = .all, filteredApps: [String] = []) {
         self.id = id
         self.type = type
@@ -760,13 +899,14 @@ struct KeyMappingRule: Identifiable, Codable {
         self.targetKeyCode = targetKeyCode
         self.targetKeyName = targetKeyName
         self.targetModifiers = targetModifiers
+        self.targetCharacter = targetCharacter
         self.isEnabled = isEnabled
         self.appFilterMode = appFilterMode
         self.filteredApps = filteredApps
     }
     
     enum CodingKeys: String, CodingKey {
-        case id, type, sourceKeyCode, sourceKeyName, sourceModifiers, targetKeyCode, targetKeyName, targetModifiers, isEnabled, appFilterMode, filteredApps
+        case id, type, sourceKeyCode, sourceKeyName, sourceModifiers, targetKeyCode, targetKeyName, targetModifiers, targetCharacter, isEnabled, appFilterMode, filteredApps
     }
     
     init(from decoder: Decoder) throws {
@@ -787,6 +927,7 @@ struct KeyMappingRule: Identifiable, Codable {
         } else {
             targetModifiers = nil
         }
+        targetCharacter = try container.decodeIfPresent(String.self, forKey: .targetCharacter)
         isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
         
         // Per-app filtering (with defaults for backward compatibility)
@@ -804,6 +945,7 @@ struct KeyMappingRule: Identifiable, Codable {
         try container.encode(targetKeyCode, forKey: .targetKeyCode)
         try container.encode(targetKeyName, forKey: .targetKeyName)
         try container.encodeIfPresent(targetModifiers?.rawValue, forKey: .targetModifiers)
+        try container.encodeIfPresent(targetCharacter, forKey: .targetCharacter)
         try container.encode(isEnabled, forKey: .isEnabled)
         try container.encode(appFilterMode, forKey: .appFilterMode)
         try container.encode(filteredApps, forKey: .filteredApps)
@@ -1456,6 +1598,7 @@ struct AddMappingSheet: View {
     @State private var fromModifiers: CGEventFlags?
     @State private var toKey = ""
     @State private var toKeyCode: UInt16 = 0
+    @State private var toCharacter: String? = nil  // Unicode character from visual keyboard
     @State private var selectedNavigationAction: NavigationAction?
     @State private var selectedApp = ""
     @State private var isCapturingFrom = false
@@ -1463,6 +1606,7 @@ struct AddMappingSheet: View {
     @State private var toKeyCodeText = ""
     @State private var keyCaptureMonitor: Any?
     @State private var isLoadingMapping = false
+    @State private var showVisualKeyboard = false  // Visual keyboard toggle
     
     // Per-app filtering
     @State private var appFilterMode: AppFilterMode = .all
@@ -1478,275 +1622,313 @@ struct AddMappingSheet: View {
                 Text(editingMapping == nil ? L10n.current.newKeyRule : L10n.current.editKeyRule)
                     .font(.title2)
                     .fontWeight(.semibold)
+                Spacer()
             }
-            .padding(.vertical, 20)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
             
             Divider()
             
-            // Content
-            VStack(spacing: 20) {
-                // Mapping Type Selection
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(L10n.current.ruleType)
-                        .font(.headline)
-                        .foregroundColor(.secondary)
-                    
-                    Picker("", selection: $mappingType) {
-                        Label(L10n.current.keySwap, systemImage: "arrow.left.arrow.right")
-                            .tag(MappingType.simpleKey)
-                        Label(L10n.current.controlAction, systemImage: "command")
-                            .tag(MappingType.navigation)
-                    }
-                    .pickerStyle(.segmented)
-                    .disabled(editingMapping != nil)  // Don't allow changing type when editing
-                }
-                
-                // Key Mapping Area
-                HStack(spacing: 20) {
-                    // FROM Key
-                    VStack(spacing: 12) {
-                        Text(L10n.current.source)
-                            .font(.caption)
-                            .fontWeight(.bold)
-                            .foregroundColor(.secondary)
-                        
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(isCapturingFrom ? Color.red.opacity(0.1) : Color.blue.opacity(0.1))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .strokeBorder(isCapturingFrom ? Color.red : Color.blue, lineWidth: 2)
-                                )
-                            
-                            VStack(spacing: 6) {
-                                if fromKey.isEmpty {
-                                    Image(systemName: "keyboard")
-                                        .font(.title)
-                                        .foregroundColor(.secondary)
-                                    Text(isCapturingFrom ? L10n.current.pressKey : L10n.current.clickHere)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                } else {
-                                    Text(fromKey)
-                                        .font(.system(size: 18, weight: .bold, design: .rounded))
-                                        .foregroundColor(.primary)
-                                }
-                            }
-                            .padding()
-                        }
-                        .frame(height: 80)
-                        .onTapGesture {
-                            isCapturingFrom = true
-                            isCapturingTo = false
-                        }
-                        
-                        if !fromKey.isEmpty {
-                            Button(action: { 
-                                fromKey = ""
-                                fromKeyCode = 0
-                                fromModifiers = nil
-                            }) {
-                                Label(L10n.current.clear, systemImage: "xmark.circle")
-                                    .font(.caption)
-                            }
-                            .buttonStyle(.borderless)
-                            .foregroundColor(.red)
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    
-                    // Arrow
-                    VStack {
-                        Spacer()
-                        Image(systemName: "arrow.right.circle.fill")
-                            .font(.system(size: 30))
-                            .foregroundColor(.green)
-                        Spacer()
-                    }
-                    .frame(height: 100)
-                    
-                    // TO Key
-                    VStack(spacing: 12) {
-                        Text(L10n.current.target)
-                            .font(.caption)
-                            .fontWeight(.bold)
-                            .foregroundColor(.secondary)
-                        
-                        if mappingType == .simpleKey {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 12)
-                                    .fill(isCapturingTo ? Color.red.opacity(0.1) : Color.green.opacity(0.1))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 12)
-                                            .strokeBorder(isCapturingTo ? Color.red : Color.green, lineWidth: 2)
-                                    )
-                                
-                                VStack(spacing: 6) {
-                                    if toKey.isEmpty {
-                                        Image(systemName: "keyboard")
-                                            .font(.title)
-                                            .foregroundColor(.secondary)
-                                        Text(isCapturingTo ? L10n.current.pressKey : L10n.current.clickHere)
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    } else {
-                                        Text(toKey)
-                                            .font(.system(size: 18, weight: .bold, design: .rounded))
-                                            .foregroundColor(.primary)
-                                    }
-                                }
-                                .padding()
-                            }
-                            .frame(height: 80)
-                            .onTapGesture {
-                                isCapturingTo = true
-                                isCapturingFrom = false
-                            }
-                            
-                            if !toKey.isEmpty {
-                                Button(action: { 
-                                    toKey = ""
-                                    toKeyCode = 0
-                                }) {
-                                    Label(L10n.current.clear, systemImage: "xmark.circle")
-                                        .font(.caption)
-                                }
-                                .buttonStyle(.borderless)
-                                .foregroundColor(.red)
-                            }
-                        } else {
-                            // Navigation action picker
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 12)
-                                    .fill(Color.purple.opacity(0.1))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 12)
-                                            .strokeBorder(Color.purple, lineWidth: 2)
-                                    )
-                                
-                                VStack(spacing: 8) {
-                                    if let action = selectedNavigationAction {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .font(.title)
-                                            .foregroundColor(.green)
-                                        Text(action.name)
-                                            .font(.system(size: 14, weight: .semibold))
-                                            .multilineTextAlignment(.center)
-                                    } else {
-                                        Image(systemName: "list.bullet")
-                                            .font(.title)
-                                            .foregroundColor(.secondary)
-                                        Text(L10n.current.selectAction)
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                                .padding()
-                            }
-                            .frame(height: 80)
-                            
-                            Picker("", selection: $selectedNavigationAction) {
-                                Text(L10n.current.select).tag(nil as NavigationAction?)
-                                ForEach(NavigationAction.all) { action in
-                                    Text(action.localizedName).tag(action as NavigationAction?)
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(maxWidth: .infinity)
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color(NSColor.windowBackgroundColor))
-                .cornerRadius(12)
-                
-                // Per-App Filter Section
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(L10n.current.appFilter)
-                        .font(.headline)
-                        .foregroundColor(.secondary)
-                    
-                    // Filter Mode Selection
-                    Picker("", selection: $appFilterMode) {
-                        Label(L10n.current.filterAllApps, systemImage: "square.stack.3d.up").tag(AppFilterMode.all)
-                        Label(L10n.current.filterExclude, systemImage: "minus.circle").tag(AppFilterMode.exclude)
-                        Label(L10n.current.filterInclude, systemImage: "checkmark.circle").tag(AppFilterMode.include)
-                    }
-                    .pickerStyle(.segmented)
-                    
-                    // Running Apps List (only if not .all)
-                    if appFilterMode != .all {
+            // Main Content Area - HStack with form on left, keyboard on right
+            HStack(alignment: .top, spacing: 0) {
+                // LEFT SIDE: Form content
+                ScrollView {
+                    VStack(spacing: 16) {
+                        // Mapping Type Selection
                         VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text(L10n.current.runningApps)
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-                                Spacer()
-                                Text("(\(appsManager.runningApps.count))")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
+                            Text(L10n.current.ruleType)
+                                .font(.headline)
+                                .foregroundColor(.secondary)
                             
-                            if appsManager.runningApps.isEmpty {
-                                HStack {
-                                    Image(systemName: "info.circle")
-                                        .foregroundColor(.orange)
-                                    Text(L10n.current.appNotRunningHint)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                .padding(8)
-                            } else {
-                                ScrollView {
-                                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
-                                        ForEach(appsManager.runningApps) { app in
-                                            HStack(spacing: 4) {
-                                                Text(app.name)
-                                                    .font(.system(size: 10, weight: .medium))
-                                                    .lineLimit(1)
-                                                Spacer(minLength: 2)
-                                                Toggle("", isOn: Binding(
-                                                    get: { selectedAppBundleIDs.contains(app.bundleID) },
-                                                    set: { isOn in
-                                                        if isOn {
-                                                            selectedAppBundleIDs.insert(app.bundleID)
-                                                        } else {
-                                                            selectedAppBundleIDs.remove(app.bundleID)
-                                                        }
-                                                    }
-                                                ))
-                                                .toggleStyle(.switch)
-                                                .scaleEffect(0.7)
-                                            }
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color.blue.opacity(0.05))
-                                            .cornerRadius(5)
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 5)
-                                                    .stroke(Color.gray.opacity(0.15), lineWidth: 0.5)
-                                            )
-                                            .help(app.bundleID)
+                            Picker("", selection: $mappingType) {
+                                Label(L10n.current.keySwap, systemImage: "arrow.left.arrow.right")
+                                    .tag(MappingType.simpleKey)
+                                Label(L10n.current.controlAction, systemImage: "command")
+                                    .tag(MappingType.navigation)
+                            }
+                            .pickerStyle(.segmented)
+                            .disabled(editingMapping != nil)
+                        }
+                        
+                        // Key Mapping Area
+                        HStack(spacing: 16) {
+                            // FROM Key
+                            VStack(spacing: 8) {
+                                Text(L10n.current.source)
+                                    .font(.caption)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.secondary)
+                                
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(isCapturingFrom ? Color.red.opacity(0.1) : Color.blue.opacity(0.1))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .strokeBorder(isCapturingFrom ? Color.red : Color.blue, lineWidth: 2)
+                                        )
+                                    
+                                    VStack(spacing: 4) {
+                                        if fromKey.isEmpty {
+                                            Image(systemName: "keyboard")
+                                                .font(.title2)
+                                                .foregroundColor(.secondary)
+                                            Text(isCapturingFrom ? L10n.current.pressKey : L10n.current.clickHere)
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                        } else {
+                                            Text(fromKey)
+                                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                                .foregroundColor(.primary)
                                         }
                                     }
                                     .padding(8)
                                 }
-                                .frame(maxHeight: 420)
-                                .background(Color(NSColor.windowBackgroundColor))
+                                .frame(height: 60)
+                                .onTapGesture {
+                                    isCapturingFrom = true
+                                    isCapturingTo = false
+                                }
+                                
+                                if !fromKey.isEmpty {
+                                    Button(action: { 
+                                        fromKey = ""
+                                        fromKeyCode = 0
+                                        fromModifiers = nil
+                                    }) {
+                                        Label(L10n.current.clear, systemImage: "xmark.circle")
+                                            .font(.caption2)
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .foregroundColor(.red)
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            
+                            // Arrow
+                            Image(systemName: "arrow.right.circle.fill")
+                                .font(.system(size: 24))
+                                .foregroundColor(.green)
+                                .padding(.top, 20)
+                            
+                            // TO Key
+                            VStack(spacing: 8) {
+                                Text(L10n.current.target)
+                                    .font(.caption)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.secondary)
+                                
+                                if mappingType == .simpleKey {
+                                    ZStack {
+                                        RoundedRectangle(cornerRadius: 10)
+                                            .fill(isCapturingTo ? Color.red.opacity(0.1) : Color.green.opacity(0.1))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 10)
+                                                    .strokeBorder(isCapturingTo ? Color.red : Color.green, lineWidth: 2)
+                                            )
+                                        
+                                        VStack(spacing: 4) {
+                                            if toKey.isEmpty {
+                                                Image(systemName: "keyboard")
+                                                    .font(.title2)
+                                                    .foregroundColor(.secondary)
+                                                Text(isCapturingTo ? L10n.current.pressKey : L10n.current.clickHere)
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                            } else {
+                                                Text(toKey)
+                                                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                                                    .foregroundColor(.primary)
+                                            }
+                                        }
+                                        .padding(8)
+                                    }
+                                    .frame(height: 60)
+                                    .onTapGesture {
+                                        isCapturingTo = true
+                                        isCapturingFrom = false
+                                    }
+                                    
+                                    HStack(spacing: 8) {
+                                        // Visual Keyboard Toggle Button
+                                        Button(action: { 
+                                            showVisualKeyboard.toggle()
+                                            isCapturingTo = false
+                                            isCapturingFrom = false
+                                        }) {
+                                            Image(systemName: showVisualKeyboard ? "keyboard.fill" : "keyboard")
+                                                .font(.caption)
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .tint(showVisualKeyboard ? .blue : .gray)
+                                        .help(L10n.current.showKeyboard)
+                                        
+                                        if !toKey.isEmpty {
+                                            Button(action: { 
+                                                toKey = ""
+                                                toKeyCode = 0
+                                            }) {
+                                                Image(systemName: "xmark.circle")
+                                                    .font(.caption)
+                                            }
+                                            .buttonStyle(.borderless)
+                                            .foregroundColor(.red)
+                                        }
+                                    }
+                                } else {
+                                    // Navigation action picker
+                                    ZStack {
+                                        RoundedRectangle(cornerRadius: 10)
+                                            .fill(Color.purple.opacity(0.1))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 10)
+                                                    .strokeBorder(Color.purple, lineWidth: 2)
+                                            )
+                                        
+                                        VStack(spacing: 4) {
+                                            if let action = selectedNavigationAction {
+                                                Image(systemName: "checkmark.circle.fill")
+                                                    .font(.title2)
+                                                    .foregroundColor(.green)
+                                                Text(action.name)
+                                                    .font(.system(size: 11, weight: .semibold))
+                                                    .multilineTextAlignment(.center)
+                                                    .lineLimit(2)
+                                            } else {
+                                                Image(systemName: "list.bullet")
+                                                    .font(.title2)
+                                                    .foregroundColor(.secondary)
+                                                Text(L10n.current.selectAction)
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                            }
+                                        }
+                                        .padding(8)
+                                    }
+                                    .frame(height: 60)
+                                    
+                                    Picker("", selection: $selectedNavigationAction) {
+                                        Text(L10n.current.select).tag(nil as NavigationAction?)
+                                        ForEach(NavigationAction.all) { action in
+                                            Text(action.localizedName).tag(action as NavigationAction?)
+                                        }
+                                    }
+                                    .labelsHidden()
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .padding(12)
+                        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                        .cornerRadius(10)
+                        
+                        // Per-App Filter Section
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(L10n.current.appFilter)
+                                .font(.headline)
+                                .foregroundColor(.secondary)
+                            
+                            Picker("", selection: $appFilterMode) {
+                                Label(L10n.current.filterAllApps, systemImage: "square.stack.3d.up").tag(AppFilterMode.all)
+                                Label(L10n.current.filterExclude, systemImage: "minus.circle").tag(AppFilterMode.exclude)
+                                Label(L10n.current.filterInclude, systemImage: "checkmark.circle").tag(AppFilterMode.include)
+                            }
+                            .pickerStyle(.segmented)
+                            
+                            if appFilterMode != .all {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack {
+                                        Text(L10n.current.runningApps)
+                                            .font(.subheadline)
+                                            .fontWeight(.medium)
+                                        Spacer()
+                                        Text("(\(appsManager.runningApps.count))")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    
+                                    if appsManager.runningApps.isEmpty {
+                                        HStack {
+                                            Image(systemName: "info.circle")
+                                                .foregroundColor(.orange)
+                                            Text(L10n.current.appNotRunningHint)
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+                                        .padding(6)
+                                    } else {
+                                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
+                                            ForEach(appsManager.runningApps) { app in
+                                                HStack(spacing: 4) {
+                                                    Text(app.name)
+                                                        .font(.system(size: 10, weight: .medium))
+                                                        .lineLimit(1)
+                                                    Spacer(minLength: 2)
+                                                    Toggle("", isOn: Binding(
+                                                        get: { selectedAppBundleIDs.contains(app.bundleID) },
+                                                        set: { isOn in
+                                                            if isOn {
+                                                                selectedAppBundleIDs.insert(app.bundleID)
+                                                            } else {
+                                                                selectedAppBundleIDs.remove(app.bundleID)
+                                                            }
+                                                        }
+                                                    ))
+                                                    .toggleStyle(.switch)
+                                                    .scaleEffect(0.6)
+                                                }
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(selectedAppBundleIDs.contains(app.bundleID) ? Color.blue.opacity(0.1) : Color.clear)
+                                                .cornerRadius(4)
+                                                .help(app.bundleID)
+                                            }
+                                        }
+                                    }
+                                }
+                                .padding(8)
+                                .background(Color(NSColor.controlBackgroundColor).opacity(0.3))
                                 .cornerRadius(8)
                             }
                         }
+                        .padding(12)
+                        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                        .cornerRadius(10)
                     }
+                    .padding(16)
                 }
-                .padding()
-                .background(Color(NSColor.windowBackgroundColor))
-                .cornerRadius(12)
+                .frame(minWidth: 400)
+                
+                // RIGHT SIDE: Visual Keyboard (only for simpleKey mode when toggled)
+                if showVisualKeyboard && mappingType == .simpleKey {
+                    Divider()
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(L10n.current.clickToSelect)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button(action: { showVisualKeyboard = false }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        
+                        VisualKeyboardView(
+                            selectedKeyCode: $toKeyCode,
+                            selectedKeyName: $toKey,
+                            selectedCharacter: $toCharacter,
+                            onKeySelected: nil
+                        )
+                        
+                        Spacer()
+                    }
+                    .padding(12)
+                    .frame(width: 480)
+                    .background(Color(NSColor.windowBackgroundColor))
+                }
             }
-            .padding(20)
-            
-            Spacer()
             
             Divider()
             
@@ -1767,9 +1949,10 @@ struct AddMappingSheet: View {
                 .disabled(!canSave)
                 .keyboardShortcut(.defaultAction)
             }
-            .padding(20)
+            .padding(16)
         }
-        .frame(width: 900, height: 650)
+        .frame(width: showVisualKeyboard && mappingType == .simpleKey ? 920 : 500, height: 520)
+        .animation(.easeInOut(duration: 0.2), value: showVisualKeyboard)
         .onAppear {
             // Suspend remapping to capture original keys, not remapped ones
             appDelegate.suspendRemapping()
@@ -1835,6 +2018,7 @@ struct AddMappingSheet: View {
                 sourceModifiers: fromModifiers,
                 targetKeyCode: toKeyCode,
                 targetKeyName: toKey,
+                targetCharacter: toCharacter,
                 appFilterMode: appFilterMode,
                 filteredApps: Array(selectedAppBundleIDs)
             )
@@ -1884,6 +2068,7 @@ struct AddMappingSheet: View {
             } else if self.isCapturingTo {
                 self.toKey = self.getKeyName(keyCode: event.keyCode, char: event.charactersIgnoringModifiers ?? "")
                 self.toKeyCode = event.keyCode
+                self.toCharacter = nil  // Physical key press - don't use Unicode character
                 self.isCapturingTo = false
                 return nil
             }
@@ -2215,6 +2400,27 @@ class KeyRemapper {
                     return nil
                 }
                 
+                // If we have a target character (from visual keyboard), use Unicode string injection
+                // This sends the actual character regardless of keyboard layout
+                if let targetChar = mapping.targetCharacter, !targetChar.isEmpty {
+                    if isKeyDown {
+                        guard let newEvent = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
+                            continue
+                        }
+                        var unicodeString = Array(targetChar.utf16)
+                        newEvent.keyboardSetUnicodeString(stringLength: unicodeString.count, unicodeString: &unicodeString)
+                        if mapping.sourceModifiers != nil {
+                            newEvent.flags = []
+                        } else {
+                            newEvent.flags = eventFlags
+                        }
+                        return Unmanaged.passRetained(newEvent)
+                    } else {
+                        // Key up - suppress it
+                        return nil
+                    }
+                }
+                
                 // Create new event with target key
                 guard let newEvent = CGEvent(
                     keyboardEventSource: nil,
@@ -2226,12 +2432,20 @@ class KeyRemapper {
                 
                 // Set modifiers:
                 // - For navigation actions, targetModifiers is usually set (e.g. ⌘ + ←).
-                // - For simple key swaps, targetModifiers is nil and we preserve the original flags.
+                // - For simple key swaps with source modifiers (e.g. Cmd+R → G):
+                //   We want to send JUST the target key, not with the source modifiers.
+                //   So if sourceModifiers was set, we clear the modifiers (send plain key).
+                // - For simple key swaps without source modifiers: preserve original flags.
                 // Memory management: Unmanaged.passRetained transfers ownership to caller (CGEventTap system)
                 if let modifiers = mapping.targetModifiers {
+                    // Navigation action with specific target modifiers
                     newEvent.flags = modifiers
+                } else if mapping.sourceModifiers != nil {
+                    // Simple key swap WITH source modifiers (e.g., Cmd+R → G)
+                    // Clear modifiers so we send just the plain target key
+                    newEvent.flags = []
                 } else {
-                    // Keep original modifiers if no target modifiers specified
+                    // Simple key swap WITHOUT source modifiers - preserve original flags
                     newEvent.flags = eventFlags
                 }
                 

@@ -2,7 +2,7 @@
 
 **A simple, secure keyboard remapper for macOS** — the straightforward alternative to Karabiner Elements.
 
-**NEW in v1.6.0:** 🌍 Full multi-language support for all 28 navigation actions in 14 languages!
+**NEW in v1.7.0:** 🎹 Visual Keyboard for easy special character selection + Unicode character support!
 
 [![Download Latest](https://img.shields.io/github/v/release/badcode64/BC64Keys?label=Download&color=success)](https://github.com/badcode64/BC64Keys/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
@@ -24,7 +24,7 @@ I created BC64Keys because I just wanted to **remap a few keys** — not learn a
 |---------|----------|-------------------|
 | Configuration | Visual GUI, click & press | JSON config files |
 | Learning curve | ⚡ Minutes | 📚 Hours/Days |
-| Codebase size | ~2,100 lines | ~100,000+ lines |
+| Codebase size | ~3,200 lines | ~100,000+ lines |
 | Code auditability | ✅ Easy to review | ❌ Very complex |
 | Setup time | 30 seconds | 10-30 minutes |
 | Universal Binary | ✅ Apple Silicon + Intel | ✅ Yes |
@@ -37,7 +37,7 @@ I created BC64Keys because I just wanted to **remap a few keys** — not learn a
 
 This is why BC64Keys is:
 - **100% Open Source** (GPL-3.0)
-- **Single file design** (~2,100 lines) — anyone can audit it in minutes
+- **Single file design** (~3,200 lines) — anyone can audit it in minutes
 - **No network access** — works completely offline
 - **No data collection** — your keystrokes stay on your Mac
 - **No external dependencies** — pure Swift/SwiftUI
@@ -50,6 +50,8 @@ This is why BC64Keys is:
 ## Features ✨
 
 - **🖱️ Visual Key Capture** — Just click and press the key you want to remap
+- **🎹 Visual Keyboard** — Interactive on-screen keyboard for easy target key selection
+- **🔤 Unicode Character Support** — Send actual characters regardless of keyboard layout
 - **🔄 Simple Key Swaps** — Remap any key to any other key
 - **🎯 Navigation Actions** — Map keys to macOS shortcuts (Home → Cmd+←, etc.)
 - **� Per-App Filtering** — Apply mappings globally, or only in specific apps
@@ -95,9 +97,9 @@ Coming from Windows? BC64Keys includes pre-configured actions for:
 
 ### Option 1: Download Release (Recommended) ⭐
 
-**Latest version: v1.6.0** ([Download](https://github.com/badcode64/BC64Keys/releases/latest))
+**Latest version: v1.7.0** ([Download](https://github.com/badcode64/BC64Keys/releases/latest))
 
-1. Download **BC64Keys-v1.6.0.dmg** from [Releases](https://github.com/badcode64/BC64Keys/releases/latest)
+1. Download **BC64Keys-v1.7.0.dmg** from [Releases](https://github.com/badcode64/BC64Keys/releases/latest)
 2. Open the DMG file
 3. Drag **BC64Keys.app** to your Applications folder
 4. Launch BC64Keys from Applications
@@ -359,7 +361,7 @@ Yes! BC64Keys is:
 - **No network access** — all processing is local
 - **No data collection** — your keystrokes never leave your Mac
 
-The entire codebase is ~2,100 lines and designed for easy security auditing.
+The entire codebase is ~3,200 lines and designed for easy security auditing.
 </details>
 
 <details>
