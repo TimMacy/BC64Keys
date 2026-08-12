@@ -708,7 +708,43 @@ class L10n: ObservableObject {
             "sv": "Ny flik", "pl": "Nowa karta",
             "ko": "새 탭", "tr": "Yeni sekme"])
     }
-    
+    var actionSwitchApp: String {
+        tr(["en": "Switch App", "hu": "Alkalmazás váltása",
+            "de": "App wechseln", "fr": "Changer d'application",
+            "es": "Cambiar de aplicación", "it": "Cambia app",
+            "ja": "アプリを切り替え", "zh": "切换应用",
+            "nl": "Wisselen van app", "pt": "Alternar app",
+            "sv": "Växla app", "pl": "Przełącz aplikację",
+            "ko": "앱 전환", "tr": "Uygulama değiştir"])
+    }
+    var actionSwitchWindow: String {
+        tr(["en": "Switch Window", "hu": "Ablak váltása",
+            "de": "Fenster wechseln", "fr": "Changer de fenêtre",
+            "es": "Cambiar de ventana", "it": "Cambia finestra",
+            "ja": "ウィンドウを切り替え", "zh": "切换窗口",
+            "nl": "Wisselen van venster", "pt": "Alternar janela",
+            "sv": "Växla fönster", "pl": "Przełącz okno",
+            "ko": "창 전환", "tr": "Pencere değiştir"])
+    }
+    var actionSwitchAppReverse: String {
+        tr(["en": "Switch App (Reverse)", "hu": "Alkalmazás váltása (visszafelé)",
+            "de": "App wechseln (rückwärts)", "fr": "Changer d'application (arrière)",
+            "es": "Cambiar de aplicación (atrás)", "it": "Cambia app (indietro)",
+            "ja": "アプリを切り替え(逆方向)", "zh": "切换应用(反向)",
+            "nl": "Wisselen van app (achteruit)", "pt": "Alternar app (reverso)",
+            "sv": "Växla app (bakåt)", "pl": "Przełącz aplikację (odwrotnie)",
+            "ko": "앱 전환(역방향)", "tr": "Uygulama değiştir (ters)"])
+    }
+    var actionSwitchWindowReverse: String {
+        tr(["en": "Switch Window (Reverse)", "hu": "Ablak váltása (visszafelé)",
+            "de": "Fenster wechseln (rückwärts)", "fr": "Changer de fenêtre (arrière)",
+            "es": "Cambiar de ventana (atrás)", "it": "Cambia finestra (indietro)",
+            "ja": "ウィンドウを切り替え(逆方向)", "zh": "切换窗口(反向)",
+            "nl": "Wisselen van venster (achteruit)", "pt": "Alternar janela (reverso)",
+            "sv": "Växla fönster (bakåt)", "pl": "Przełącz okno (odwrotnie)",
+            "ko": "창 전환(역방향)", "tr": "Pencere değiştir (ters)"])
+    }
+
     // MARK: - Visual Keyboard
     var visualKeyboard: String {
         tr(["en": "Visual Keyboard", "hu": "Vizuális billentyűzet",
