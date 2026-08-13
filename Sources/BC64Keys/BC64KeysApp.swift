@@ -647,6 +647,14 @@ struct NavigationAction: Identifiable, Codable, Hashable {
             return "⌘N " + L10n.current.actionNewWindow
         } else if name.contains("New Tab") {
             return "⌘T " + L10n.current.actionNewTab
+        } else if name.contains("Switch App (Reverse)") {
+            return "⇧⌘Tab " + L10n.current.actionSwitchAppReverse
+        } else if name.contains("Switch Window (Reverse)") {
+            return "⇧⌘` " + L10n.current.actionSwitchWindowReverse
+        } else if name.contains("Switch App") {
+            return "⌘Tab " + L10n.current.actionSwitchApp
+        } else if name.contains("Switch Window") {
+            return "⌘` " + L10n.current.actionSwitchWindow
         }
         return name // Fallback to English name
     }
@@ -735,6 +743,12 @@ extension NavigationAction {
         NavigationAction(name: "⌘Q Quit", key: 12, modifiers: .maskCommand),
         NavigationAction(name: "⌘N New Window/Document", key: 45, modifiers: .maskCommand),
         NavigationAction(name: "⌘T New Tab", key: 17, modifiers: .maskCommand),
+        
+        // === WINDOW SWITCHING (replaces Alt+Tab) ===
+        NavigationAction(name: "⌘Tab Switch App", key: 48, modifiers: .maskCommand),
+        NavigationAction(name: "⌘` Switch Window", key: 50, modifiers: .maskCommand),
+        NavigationAction(name: "⇧⌘Tab Switch App (Reverse)", key: 48, modifiers: [.maskCommand, .maskShift]),
+        NavigationAction(name: "⇧⌘` Switch Window (Reverse)", key: 50, modifiers: [.maskCommand, .maskShift]),
     ]
 }
 
