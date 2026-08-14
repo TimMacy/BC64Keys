@@ -11,6 +11,7 @@
 !LICENSE
 !CONTRIBUTING.md
 !SECURITY.md
+!RELEASE_NOTES_v*.md
 !build.sh
 !run.sh
 !AppIcon.icns

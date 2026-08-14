@@ -2,7 +2,7 @@
 
 **A simple, secure keyboard remapper for macOS** — the straightforward alternative to Karabiner Elements.
 
-**NEW in v1.7.0:** 🎹 Visual Keyboard for easy special character selection + Unicode character support!
+**NEW in v1.8.0:** 🪟 Alt+Tab style window switching — Switch App (⌘Tab) and Switch Window (⌘`) presets!
 
 [![Download Latest](https://img.shields.io/github/v/release/badcode64/BC64Keys?label=Download&color=success)](https://github.com/badcode64/BC64Keys/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
@@ -67,6 +67,7 @@ This is why BC64Keys is:
 ### Perfect for Windows Switchers 🪟→🍎
 
 Coming from Windows? BC64Keys includes pre-configured actions for:
+- Alt+Tab → Switch App (⌘Tab) / Switch Window (⌘`)
 - Home/End → Line start/end (⌘←/⌘→)
 - Ctrl+Home/End → Document start/end
 - Page Up/Down → macOS equivalents
@@ -97,9 +98,9 @@ Coming from Windows? BC64Keys includes pre-configured actions for:
 
 ### Option 1: Download Release (Recommended) ⭐
 
-**Latest version: v1.7.0** ([Download](https://github.com/badcode64/BC64Keys/releases/latest))
+**Latest version: v1.8.0** ([Download](https://github.com/badcode64/BC64Keys/releases/latest))
 
-1. Download **BC64Keys-v1.7.0.dmg** from [Releases](https://github.com/badcode64/BC64Keys/releases/latest)
+1. Download **BC64Keys-v1.8.0.dmg** from [Releases](https://github.com/badcode64/BC64Keys/releases/latest)
 2. Open the DMG file
 3. Drag **BC64Keys.app** to your Applications folder
 4. Launch BC64Keys from Applications

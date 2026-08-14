@@ -15,6 +15,11 @@ import ServiceManagement
 //   - blocks them (discard), or
 //   - emits a replacement CGEvent (remap)
 //
+// v1.8.0 Features:
+// - Window switching navigation actions: Switch App (⌘Tab) and Switch Window (⌘`)
+// - Event pass-through: unmapped keys keep the original CGEvent
+// - Navigation preset restore matches key code + modifiers
+//
 // v1.7.0 Features:
 // - Visual Keyboard: Interactive on-screen keyboard for selecting target keys
 // - Unicode Character Support: Send actual characters via keyboardSetUnicodeString()
