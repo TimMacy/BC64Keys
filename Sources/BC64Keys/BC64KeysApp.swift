@@ -1983,13 +1983,15 @@ struct AddMappingSheet: View {
                 fromModifiers = mapping.sourceModifiers
                 toKey = mapping.targetKeyName
                 toKeyCode = mapping.targetKeyCode
+                toCharacter = mapping.targetCharacter
                 mappingType = mapping.type
                 appFilterMode = mapping.appFilterMode
                 selectedAppBundleIDs = Set(mapping.filteredApps)
                 
                 if mapping.type == .navigation {
-                    selectedNavigationAction = NavigationAction.all.first { 
-                        $0.key == mapping.targetKeyCode 
+                    selectedNavigationAction = NavigationAction.all.first {
+                        $0.key == mapping.targetKeyCode &&
+                        $0.modifiers == mapping.targetModifiers
                     }
                 }
                 
@@ -2294,185 +2296,148 @@ class KeyRemapper {
         if type == .flagsChanged {
             let capsLockActive = eventFlags.contains(.maskAlphaShift)
             
-            // Detect Caps Lock press (transition from inactive to active)
             if capsLockActive && !capsLockPressed {
                 capsLockPressed = true
-                // Treat as "key down" for Caps Lock (use keyCode 57)
-                return handleKeyMapping(keyCode: 57, eventFlags: eventFlags, isKeyDown: true)
-            }
-            // Detect Caps Lock release (transition from active to inactive)
-            else if !capsLockActive && capsLockPressed {
+                if findMatchingMapping(keyCode: 57, eventFlags: eventFlags) != nil {
+                    if let down = handleKeyMapping(keyCode: 57, eventFlags: eventFlags, isKeyDown: true, originalEvent: nil)?.takeRetainedValue() {
+                        down.post(tap: .cghidEventTap)
+                    }
+                    if let up = handleKeyMapping(keyCode: 57, eventFlags: eventFlags, isKeyDown: false, originalEvent: nil)?.takeRetainedValue() {
+                        up.post(tap: .cghidEventTap)
+                    }
+                    return nil
+                }
+                return Unmanaged.passUnretained(event)
+            } else if !capsLockActive && capsLockPressed {
                 capsLockPressed = false
-                // Treat as "key up" for Caps Lock (use keyCode 57)
-                return handleKeyMapping(keyCode: 57, eventFlags: eventFlags, isKeyDown: false)
+                if findMatchingMapping(keyCode: 57, eventFlags: eventFlags) != nil {
+                    return nil
+                }
+                return Unmanaged.passUnretained(event)
             }
             
-            // No Caps Lock state change, pass through
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
         
         // Handle normal key events
         if type == .keyDown || type == .keyUp {
-            return handleKeyMapping(keyCode: keyCode, eventFlags: eventFlags, isKeyDown: type == .keyDown)
+            return handleKeyMapping(keyCode: keyCode, eventFlags: eventFlags, isKeyDown: type == .keyDown, originalEvent: event)
         }
         
         return Unmanaged.passRetained(event)
     }
     
-    private func handleKeyMapping(keyCode: UInt16, eventFlags: CGEventFlags, isKeyDown: Bool) -> Unmanaged<CGEvent>? {
-        // Get enabled mappings from manager
-        // IMPORTANT: Copy mappings array to avoid race conditions since CGEventTap callback
-        // runs on a different thread than main thread where mappings may be modified.
-        // The filter operation creates a new array, providing thread-safety for iteration.
-        guard let manager = mappingManager else {
-            // No manager - create pass-through event
-            guard let passThroughEvent = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(keyCode), keyDown: isKeyDown) else {
-                return nil
-            }
-            passThroughEvent.flags = eventFlags
-            return Unmanaged.passRetained(passThroughEvent)
-        }
-        
-        // Create a snapshot: filter() returns a new array, safe to iterate even if original changes
+    private func findMatchingMapping(keyCode: UInt16, eventFlags: CGEventFlags) -> KeyMappingRule? {
+        guard let manager = mappingManager else { return nil }
         let mappings = manager.mappings.filter({ $0.isEnabled })
+        if mappings.isEmpty { return nil }
         
-        if mappings.isEmpty {
-            // No enabled mappings - create pass-through event
-            guard let passThroughEvent = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(keyCode), keyDown: isKeyDown) else {
-                return nil
-            }
-            passThroughEvent.flags = eventFlags
-            return Unmanaged.passRetained(passThroughEvent)
-        }
-        
-        // Get active app bundle ID for per-app filtering (using cached value for performance)
         let activeBundleID = cachedBundleID
         
-        // Debug: log active app info
-        if debugLoggingEnabled && !activeBundleID.isEmpty {
-            print("🎯 Active app: \(activeBundleID)")
-        }
-        
-        // Matching strategy:
-        // - Key code must match.
-        // - Per-app filter must allow the mapping.
-        // - If the rule specifies sourceModifiers: require an exact match for the user-controlled modifiers.
-        // - If the rule has no sourceModifiers: reject events where the user is holding any modifiers.
-        // This keeps rules unambiguous (e.g., a plain Home rule won't also trigger on Shift+Home).
         for mapping in mappings {
-            if keyCode == mapping.sourceKeyCode {
-                // Check per-app filter
-                let shouldApply: Bool
-                switch mapping.appFilterMode {
-                case .all:
-                    shouldApply = true
-                case .exclude:
-                    shouldApply = !mapping.filteredApps.contains(activeBundleID)
-                case .include:
-                    shouldApply = mapping.filteredApps.contains(activeBundleID)
-                }
+            guard keyCode == mapping.sourceKeyCode else { continue }
+            
+            let shouldApply: Bool
+            switch mapping.appFilterMode {
+            case .all:
+                shouldApply = true
+            case .exclude:
+                shouldApply = !mapping.filteredApps.contains(activeBundleID)
+            case .include:
+                shouldApply = mapping.filteredApps.contains(activeBundleID)
+            }
+            if !shouldApply { continue }
+            
+            if let requiredMods = mapping.sourceModifiers {
+                let shiftPressed = eventFlags.contains(.maskShift)
+                let cmdPressed = eventFlags.contains(.maskCommand)
+                let optPressed = eventFlags.contains(.maskAlternate)
+                let ctrlPressed = eventFlags.contains(.maskControl)
                 
-                if debugLoggingEnabled {
-                    print("🔍 Filter: mode=\(mapping.appFilterMode), shouldApply=\(shouldApply), activeBundleID=\(activeBundleID), filtered=\(mapping.filteredApps)")
-                }
+                let reqShift = requiredMods.contains(.maskShift)
+                let reqCmd = requiredMods.contains(.maskCommand)
+                let reqOpt = requiredMods.contains(.maskAlternate)
+                let reqCtrl = requiredMods.contains(.maskControl)
                 
-                if !shouldApply {
-                    continue // Skip this mapping for current app
-                }
-                
-                // Check if source modifiers match (if specified)
-                if let requiredMods = mapping.sourceModifiers {
-                    // Only check user-controlled modifier keys
-                    let shiftPressed = eventFlags.contains(.maskShift)
-                    let cmdPressed = eventFlags.contains(.maskCommand)
-                    let optPressed = eventFlags.contains(.maskAlternate)
-                    let ctrlPressed = eventFlags.contains(.maskControl)
-                    
-                    let reqShift = requiredMods.contains(.maskShift)
-                    let reqCmd = requiredMods.contains(.maskCommand)
-                    let reqOpt = requiredMods.contains(.maskAlternate)
-                    let reqCtrl = requiredMods.contains(.maskControl)
-                    
-                    if shiftPressed != reqShift || cmdPressed != reqCmd || optPressed != reqOpt || ctrlPressed != reqCtrl {
-                        continue // Modifiers don't match, try next mapping
-                    }
-                } else {
-                    // No source modifiers required - but make sure user isn't pressing any
-                    let hasUserModifiers = eventFlags.contains(.maskShift) || 
-                                          eventFlags.contains(.maskCommand) || 
-                                          eventFlags.contains(.maskAlternate) || 
-                                          eventFlags.contains(.maskControl)
-                    if hasUserModifiers {
-                        continue // User is pressing modifiers but rule doesn't want any
-                    }
-                }
-                
-                // Special case: discard / block.
-                // Convention: targetKeyCode == 0 and targetModifiers == nil means “block the key entirely”.
-                if mapping.targetKeyCode == 0 && mapping.targetModifiers == nil {
-                    // Discard - return nil to block the key completely
-                    return nil
-                }
-                
-                // If we have a target character (from visual keyboard), use Unicode string injection
-                // This sends the actual character regardless of keyboard layout
-                if let targetChar = mapping.targetCharacter, !targetChar.isEmpty {
-                    if isKeyDown {
-                        guard let newEvent = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
-                            continue
-                        }
-                        var unicodeString = Array(targetChar.utf16)
-                        newEvent.keyboardSetUnicodeString(stringLength: unicodeString.count, unicodeString: &unicodeString)
-                        if mapping.sourceModifiers != nil {
-                            newEvent.flags = []
-                        } else {
-                            newEvent.flags = eventFlags
-                        }
-                        return Unmanaged.passRetained(newEvent)
-                    } else {
-                        // Key up - suppress it
-                        return nil
-                    }
-                }
-                
-                // Create new event with target key
-                guard let newEvent = CGEvent(
-                    keyboardEventSource: nil,
-                    virtualKey: CGKeyCode(mapping.targetKeyCode),
-                    keyDown: isKeyDown
-                ) else {
+                if shiftPressed != reqShift || cmdPressed != reqCmd || optPressed != reqOpt || ctrlPressed != reqCtrl {
                     continue
                 }
-                
-                // Set modifiers:
-                // - For navigation actions, targetModifiers is usually set (e.g. ⌘ + ←).
-                // - For simple key swaps with source modifiers (e.g. Cmd+R → G):
-                //   We want to send JUST the target key, not with the source modifiers.
-                //   So if sourceModifiers was set, we clear the modifiers (send plain key).
-                // - For simple key swaps without source modifiers: preserve original flags.
-                // Memory management: Unmanaged.passRetained transfers ownership to caller (CGEventTap system)
-                if let modifiers = mapping.targetModifiers {
-                    // Navigation action with specific target modifiers
-                    newEvent.flags = modifiers
-                } else if mapping.sourceModifiers != nil {
-                    // Simple key swap WITH source modifiers (e.g., Cmd+R → G)
-                    // Clear modifiers so we send just the plain target key
-                    newEvent.flags = []
-                } else {
-                    // Simple key swap WITHOUT source modifiers - preserve original flags
-                    newEvent.flags = eventFlags
-                }
-                
-                return Unmanaged.passRetained(newEvent)
+            } else {
+                let hasUserModifiers = eventFlags.contains(.maskShift) ||
+                                      eventFlags.contains(.maskCommand) ||
+                                      eventFlags.contains(.maskAlternate) ||
+                                      eventFlags.contains(.maskControl)
+                if hasUserModifiers { continue }
             }
+            
+            return mapping
         }
-        
-        // No mapping found - create pass-through event
+        return nil
+    }
+    
+    private func passThrough(originalEvent: CGEvent?, keyCode: UInt16, eventFlags: CGEventFlags, isKeyDown: Bool) -> Unmanaged<CGEvent>? {
+        if let originalEvent = originalEvent {
+            return Unmanaged.passUnretained(originalEvent)
+        }
         guard let passThroughEvent = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(keyCode), keyDown: isKeyDown) else {
             return nil
         }
         passThroughEvent.flags = eventFlags
         return Unmanaged.passRetained(passThroughEvent)
+    }
+    
+    private func handleKeyMapping(keyCode: UInt16, eventFlags: CGEventFlags, isKeyDown: Bool, originalEvent: CGEvent? = nil) -> Unmanaged<CGEvent>? {
+        if debugLoggingEnabled && !cachedBundleID.isEmpty {
+            print("🎯 Active app: \(cachedBundleID)")
+        }
+        
+        guard let mapping = findMatchingMapping(keyCode: keyCode, eventFlags: eventFlags) else {
+            return passThrough(originalEvent: originalEvent, keyCode: keyCode, eventFlags: eventFlags, isKeyDown: isKeyDown)
+        }
+        
+        if debugLoggingEnabled {
+            print("🔍 Filter: mode=\(mapping.appFilterMode), activeBundleID=\(cachedBundleID), filtered=\(mapping.filteredApps)")
+        }
+        
+        if mapping.targetKeyCode == 0 && mapping.targetModifiers == nil &&
+            mapping.type == .navigation && (mapping.targetCharacter?.isEmpty ?? true) {
+            return nil
+        }
+        if let targetChar = mapping.targetCharacter, !targetChar.isEmpty {
+            if isKeyDown {
+                guard let newEvent = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
+                    return passThrough(originalEvent: originalEvent, keyCode: keyCode, eventFlags: eventFlags, isKeyDown: isKeyDown)
+                }
+                var unicodeString = Array(targetChar.utf16)
+                newEvent.keyboardSetUnicodeString(stringLength: unicodeString.count, unicodeString: &unicodeString)
+                if mapping.sourceModifiers != nil {
+                    newEvent.flags = []
+                } else {
+                    newEvent.flags = eventFlags
+                }
+                return Unmanaged.passRetained(newEvent)
+            } else {
+                return nil
+            }
+        }
+        
+        guard let newEvent = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: CGKeyCode(mapping.targetKeyCode),
+            keyDown: isKeyDown
+        ) else {
+            return passThrough(originalEvent: originalEvent, keyCode: keyCode, eventFlags: eventFlags, isKeyDown: isKeyDown)
+        }
+        
+        if let modifiers = mapping.targetModifiers {
+            newEvent.flags = modifiers
+        } else if mapping.sourceModifiers != nil {
+            newEvent.flags = []
+        } else {
+            newEvent.flags = eventFlags
+        }
+        
+        return Unmanaged.passRetained(newEvent)
     }
     
     deinit {
