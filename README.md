@@ -2,7 +2,7 @@
 
 **A simple, secure keyboard remapper for macOS** — the straightforward alternative to Karabiner Elements.
 
-**NEW in v1.8.0:** 🪟 Alt+Tab style window switching — Switch App (⌘Tab) and Switch Window (⌘`) presets!
+**NEW in v1.9.0:** Hide Dock Icon — run from the menu bar, click the B icon to open the window.
 
 [![Download Latest](https://img.shields.io/github/v/release/badcode64/BC64Keys?label=Download&color=success)](https://github.com/badcode64/BC64Keys/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
@@ -59,6 +59,7 @@ This is why BC64Keys is:
 - **🚫 Key Blocking** — Disable annoying keys completely
 - **🔍 Real-time Monitor** — See exactly what keys are being pressed
 - **🚀 Launch at Login** — Optional auto-start when you log in (toggle in Settings)
+- **📌 Hide Dock Icon** — Optional menu-bar mode: the app stays in the menu bar, click B to show the window
 - **🌍 Multi-language** — 14 languages: English, Hungarian, German, French, Spanish, Italian, Japanese, Chinese, Dutch, Portuguese, Swedish, Polish, Korean, Turkish
 - **⚡ Instant Apply** — Changes take effect immediately, no restart needed
 - **💾 Auto-save** — Your mappings persist between app restarts
@@ -99,9 +100,9 @@ Coming from Windows? BC64Keys includes pre-configured actions for:
 
 ### Option 1: Download Release (Recommended) ⭐
 
-**Latest version: v1.8.0** ([Download](https://github.com/badcode64/BC64Keys/releases/latest))
+**Latest version: v1.9.0** ([Download](https://github.com/badcode64/BC64Keys/releases/latest))
 
-1. Download **BC64Keys-v1.8.0.dmg** from [Releases](https://github.com/badcode64/BC64Keys/releases/latest)
+1. Download **BC64Keys-v1.9.0.dmg** from [Releases](https://github.com/badcode64/BC64Keys/releases/latest)
 2. Open the DMG file
 3. Drag **BC64Keys.app** to your Applications folder
 4. Launch BC64Keys from Applications

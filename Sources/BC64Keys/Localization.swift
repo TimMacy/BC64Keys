@@ -324,6 +324,32 @@ class L10n: ObservableObject {
         tr(["en": "The app will start automatically when you turn on your computer.", "hu": "Az alkalmazás automatikusan elindul a számítógép bekapcsolásakor.", "de": "Die App startet automatisch beim Einschalten des Computers.", "fr": "L'application démarre automatiquement au démarrage de l'ordinateur.",
             "es": "La aplicación se iniciará automáticamente al encender la computadora.", "it": "L'app si avvierà automaticamente all'accensione del computer.", "ja": "コンピュータの起動時にアプリが自動的に起動します。", "zh": "打开计算机时应用将自动启动。"])
     }
+    var hideDockIcon: String {
+        tr(["en": "Hide Dock Icon", "hu": "Dock ikon elrejtése", "de": "Dock-Symbol ausblenden", "fr": "Masquer l'icône du Dock",
+            "es": "Ocultar icono del Dock", "it": "Nascondi icona del Dock", "ja": "Dockアイコンを隠す", "zh": "隐藏程序坞图标"])
+    }
+    var hideDockIconHint: String {
+        tr(["en": "The app stays in the menu bar. Click the B icon to show this window. If the Dock icon does not return when turned off, quit and reopen the app.",
+            "hu": "Az app a menüsorban marad. A B ikonnal nyithatod az ablakot. Ha a Dock ikon kikapcsoláskor nem jön vissza, lépj ki és indítsd újra.",
+            "de": "Die App bleibt in der Menüleiste. Klicken Sie auf das B-Symbol, um dieses Fenster anzuzeigen. Erscheint das Dock-Symbol nach dem Deaktivieren nicht, beenden Sie die App und starten Sie sie neu.",
+            "fr": "L'app reste dans la barre de menus. Cliquez sur l'icône B pour afficher cette fenêtre. Si l'icône du Dock ne réapparaît pas, quittez puis relancez l'app.",
+            "es": "La app permanece en la barra de menús. Haz clic en el icono B para mostrar esta ventana. Si el icono del Dock no vuelve, cierra y vuelve a abrir la app.",
+            "it": "L'app resta nella barra dei menu. Clicca l'icona B per mostrare questa finestra. Se l'icona del Dock non riappare, esci e riapri l'app.",
+            "ja": "アプリはメニューバーに残ります。Bアイコンをクリックするとこのウィンドウが表示されます。Dockアイコンが戻らない場合は、終了して再起動してください。",
+            "zh": "应用会留在菜单栏。点击 B 图标可显示此窗口。如果关闭后程序坞图标未恢复，请退出并重新打开应用。"])
+    }
+    var menuShowWindow: String {
+        tr(["en": "Show Window", "hu": "Ablak megjelenítése", "de": "Fenster einblenden", "fr": "Afficher la fenêtre",
+            "es": "Mostrar ventana", "it": "Mostra finestra", "ja": "ウィンドウを表示", "zh": "显示窗口"])
+    }
+    var menuHideWindow: String {
+        tr(["en": "Hide Window", "hu": "Ablak elrejtése", "de": "Fenster ausblenden", "fr": "Masquer la fenêtre",
+            "es": "Ocultar ventana", "it": "Nascondi finestra", "ja": "ウィンドウを隠す", "zh": "隐藏窗口"])
+    }
+    var menuQuit: String {
+        tr(["en": "Quit BC64Keys", "hu": "Kilépés a BC64Keys-ből", "de": "BC64Keys beenden", "fr": "Quitter BC64Keys",
+            "es": "Salir de BC64Keys", "it": "Esci da BC64Keys", "ja": "BC64Keysを終了", "zh": "退出 BC64Keys"])
+    }
     var language: String {
         tr(["en": "Language", "hu": "Nyelv", "de": "Sprache", "fr": "Langue",
             "es": "Idioma", "it": "Lingua", "ja": "言語", "zh": "语言",

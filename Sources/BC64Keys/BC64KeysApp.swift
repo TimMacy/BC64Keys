@@ -15,6 +15,9 @@ import ServiceManagement
 //   - blocks them (discard), or
 //   - emits a replacement CGEvent (remap)
 //
+// v1.9.0 Features:
+// - Optional Hide Dock Icon: run from the menu bar, click B to show the window
+//
 // v1.8.0 Features:
 // - Window switching navigation actions: Switch App (⌘Tab) and Switch Window (⌘`)
 // - Event pass-through: unmapped keys keep the original CGEvent
@@ -50,7 +53,7 @@ struct BC64KeysApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
     var body: some Scene {
-        WindowGroup {
+        Window("BC64Keys", id: "main") {
             ContentView(mappingManager: appDelegate.mappingManager, statusManager: appDelegate.statusManager)
                 .environmentObject(appDelegate)
                 .frame(minWidth: 700, minHeight: 500)
@@ -104,10 +107,12 @@ class LaunchAtLoginManager: ObservableObject {
 }
 
 // MARK: - App Delegate for Accessibility Permissions
-class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableObject {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, ObservableObject {
     var keyRemapper: KeyRemapper?
     var statusCheckTimer: Timer?
     var statusItem: NSStatusItem?
+    private var statusMenu: NSMenu?
+    private var mainWindowRef: NSWindow?
     
     // Track previous state to avoid spamming logs
     private var previousAccessibilityState: Bool?
@@ -116,6 +121,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Observable
     // Debug logging is now optional - only enabled if user explicitly turns it on in Settings.
     // This reduces SSD wear and avoids logging sensitive keystroke patterns by default.
     @AppStorage("bc64keys.debugLogging") var debugLoggingEnabled: Bool = false
+    @AppStorage("bc64keys.hideDockIcon") var hideDockIcon: Bool = false
     
     // Prefer a per-user log location instead of /tmp to reduce information exposure and
     // avoid symlink-related file clobbering risks.
@@ -199,14 +205,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Observable
         }
         log("==================================================")
         
+        applyActivationPolicy()
+        
         // Setup menu bar icon (like Karabiner Elements)
         setupMenuBar()
         
         // Ensure the main window is visible and active on startup
         // This fixes the issue where the window doesn't show automatically
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.ensureMainWindowVisible()
-            self.setupWindowDelegates()
+            if self.hideDockIcon && self.launchedAsLoginItem() {
+                self.mainWindow()?.orderOut(nil)
+            } else {
+                self.showMainWindow()
+            }
         }
         
         // Start frequent status check (2 second interval) until accessibility is granted.
@@ -228,9 +239,98 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Observable
             let icon = createMenuBarIcon()
             icon.isTemplate = true  // Makes it white in menu bar
             button.image = icon
-            button.action = #selector(statusItemClicked)
             button.target = self
+            button.action = #selector(statusBarButtonClicked)
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
+        
+        let menu = NSMenu()
+        menu.delegate = self
+        statusMenu = menu
+    }
+    
+    // Only the Dock presence changes here; the window is left exactly as it was.
+    func applyActivationPolicy() {
+        let hide = UserDefaults.standard.bool(forKey: "bc64keys.hideDockIcon")
+        let policy: NSApplication.ActivationPolicy = hide ? .accessory : .regular
+        guard NSApp.activationPolicy() != policy else { return }
+        
+        let wasVisible = mainWindow()?.isVisible == true
+        NSApp.setActivationPolicy(policy)
+        
+        // Switching policy can drop the app behind other windows
+        guard wasVisible else { return }
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            self.mainWindow()?.makeKeyAndOrderFront(nil)
+        }
+    }
+    
+    private func launchedAsLoginItem() -> Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent else { return false }
+        return event.eventID == kAEOpenApplication &&
+            event.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+    }
+    
+    // The single SwiftUI window is never closed, only ordered out, so it can always be shown again.
+    @discardableResult
+    private func mainWindow() -> NSWindow? {
+        if let window = mainWindowRef { return window }
+        guard let window = NSApp.windows.first(where: {
+            $0.canBecomeMain && $0.styleMask.contains(.titled)
+        }) else { return nil }
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        mainWindowRef = window
+        return window
+    }
+    
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        
+        let showHide = NSMenuItem(
+            title: mainWindow()?.isVisible == true ? L10n.current.menuHideWindow : L10n.current.menuShowWindow,
+            action: #selector(statusItemClicked),
+            keyEquivalent: ""
+        )
+        showHide.target = self
+        menu.addItem(showHide)
+        menu.addItem(.separator())
+        
+        let quit = NSMenuItem(
+            title: L10n.current.menuQuit,
+            action: #selector(quitApp),
+            keyEquivalent: "q"
+        )
+        quit.target = self
+        menu.addItem(quit)
+    }
+    
+    @objc func quitApp() {
+        NSApp.terminate(nil)
+    }
+    
+    @objc func statusBarButtonClicked() {
+        if NSApp.currentEvent?.type == .rightMouseUp,
+           let button = statusItem?.button,
+           let menu = statusMenu {
+            menuNeedsUpdate(menu)
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height), in: button)
+            return
+        }
+        showMainWindow()
+    }
+    
+    func showMainWindow() {
+        applyActivationPolicy()
+        NSApp.unhide(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        guard let window = mainWindow() else { return }
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
     }
     
     // Create custom menu bar icon - simple square with "B" letter
@@ -270,67 +370,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Observable
     
     // When status item is clicked, toggle window visibility
     @objc func statusItemClicked() {
-        let mainWindows = NSApp.windows.filter { window in
-            !window.className.contains("Panel") && 
-            !window.className.contains("Alert") &&
-            !window.className.contains("Tooltip")
-        }
-        
-        if let mainWindow = mainWindows.first {
-            // Window exists - just toggle visibility
-            if mainWindow.isVisible && NSApp.isActive {
-                // Hide the window and app
-                mainWindow.orderOut(nil)
-                NSApp.hide(nil)
-            } else {
-                // Show the window
-                NSApp.activate(ignoringOtherApps: true)
-                mainWindow.makeKeyAndOrderFront(nil)
-            }
-        }
-    }
-    
-    // Setup window delegates to intercept close button
-    private func setupWindowDelegates() {
-        for window in NSApp.windows {
-            if !window.className.contains("Panel") && 
-               !window.className.contains("Alert") &&
-               !window.className.contains("Tooltip") {
-                window.delegate = self
-            }
+        if let window = mainWindow(), window.isVisible, NSApp.isActive {
+            window.orderOut(nil)
+        } else {
+            showMainWindow()
         }
     }
     
     // Intercept window close - just hide instead of destroying
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)
-        NSApp.hide(nil)
         return false  // Don't actually close/destroy the window
-    }
-    
-    // Helper method to ensure the main window is visible and active
-    private func ensureMainWindowVisible() {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.unhide(nil)
-        
-        // Bring existing windows to front
-        for window in NSApp.windows {
-            if !window.className.contains("Panel") && 
-               !window.className.contains("Alert") &&
-               !window.className.contains("Tooltip") {
-                // Deminiaturize if minimized
-                if window.isMiniaturized {
-                    window.deminiaturize(nil)
-                }
-                window.makeKeyAndOrderFront(nil)
-                window.orderFrontRegardless()
-            }
-        }
     }
     
     // Keep app running when window is hidden
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return false
+    }
+    
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showMainWindow()
         return false
     }
     
@@ -1208,10 +1267,12 @@ struct StatusBar: View {
 
 // MARK: - Settings View
 struct SettingsView: View {
+    @EnvironmentObject var appDelegate: AppDelegate
     @ObservedObject var l10n = L10n.shared
     @StateObject private var launchManager = LaunchAtLoginManager()
     @AppStorage("selectedLanguage") private var selectedLanguageRaw: String = AppLanguage.system.rawValue
     @AppStorage("bc64keys.debugLogging") private var debugLoggingEnabled: Bool = false
+    @AppStorage("bc64keys.hideDockIcon") private var hideDockIcon: Bool = false
     
     private var selectedLanguage: AppLanguage {
         get { AppLanguage(rawValue: selectedLanguageRaw) ?? .system }
@@ -1268,6 +1329,32 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.menu)
                     .frame(width: 150)
+                }
+                .padding(12)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(8)
+                
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label(L10n.current.hideDockIcon, systemImage: "macwindow")
+                            .font(.headline)
+                        
+                        Toggle("", isOn: Binding(
+                            get: { hideDockIcon },
+                            set: { newValue in
+                                hideDockIcon = newValue
+                                appDelegate.applyActivationPolicy()
+                            }
+                        ))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        
+                        Spacer()
+                    }
+                    
+                    Text(L10n.current.hideDockIconHint)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
                 .padding(12)
                 .background(Color(NSColor.controlBackgroundColor))
