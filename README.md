@@ -42,6 +42,7 @@ This is why BC64Keys is:
 - **No data collection** — your keystrokes stay on your Mac
 - **No external dependencies** — pure Swift/SwiftUI
 - **Apple Notarized** — verified and signed by Apple's security team
+- **Verified commits** — maintainer commits are SSH-signed (green Verified badge on GitHub)
 
 > Unlike massive, complex tools where security vulnerabilities can hide in thousands of files, BC64Keys is simple enough that **you can read and verify the entire codebase yourself in under an hour**.
 

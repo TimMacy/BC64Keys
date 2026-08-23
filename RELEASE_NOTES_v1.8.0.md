@@ -29,6 +29,13 @@ Choose your preferred format:
 - Smaller download size
 - Direct app bundle
 
+SHA-256 (GitHub release assets):
+
+```
+33acca1faf670b305ec16bb5d23c31f4a06f0ed56a9eeddf908b74b82334cdfc  BC64Keys-v1.8.0.dmg
+f9078d175a6e8b610ed42175fbe4bab6dcb19c19c147f708ca876fc004db53d8  BC64Keys-v1.8.0-notarized.zip
+```
+
 ## Installation
 
 ### First-Time Installation
@@ -65,7 +72,6 @@ Simply replace the old app with the new one. Your settings and key mappings are 
 
 - 📖 [User Guide](https://github.com/badcode64/BC64Keys/blob/main/README.md)
 - 🐛 [Report Issues](https://github.com/badcode64/BC64Keys/issues)
-- 💬 [Discussions](https://github.com/badcode64/BC64Keys/discussions)
 
 ---
 

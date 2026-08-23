@@ -6,6 +6,7 @@ Thanks for your interest in contributing!
 - **Keep it auditable:** the core app intentionally lives in a single file: [Sources/BC64Keys/BC64KeysApp.swift](Sources/BC64Keys/BC64KeysApp.swift)
 - **No external dependencies:** prefer standard Swift/SwiftUI + system frameworks
 - **Privacy-first:** no network features, no telemetry
+- **Maintainer commits are signed** (GitHub Verified). Contributors do not need to sign.
 
 ## Dev setup
 Requirements:

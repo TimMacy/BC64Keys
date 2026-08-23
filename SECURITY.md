@@ -45,18 +45,13 @@ If you discover a security vulnerability, please report it privately:
    - Potential impact
    - Suggested fix (if any)
 
-### Alternative Method: Direct Email
-
-If you prefer email, you can reach out to:
-
-**Email:** [GitHub username]@users.noreply.github.com  
-**Subject:** `[SECURITY] BC64Keys Vulnerability Report`
-
 Please include:
 - A clear description of the issue
 - Steps to reproduce the vulnerability
 - macOS version and BC64Keys version affected
 - Any proof-of-concept code (if applicable)
+
+Do not use public issues or email for security reports.
 
 ---
 
@@ -100,7 +95,11 @@ satisfies its Designated Requirement
 Before trusting any keyboard monitoring app:
 1. Read the source code: [`BC64KeysApp.swift`](Sources/BC64Keys/BC64KeysApp.swift)
 2. Build from source yourself using `./build.sh`
-3. Compare checksums with official releases
+3. Compare the SHA-256 of the downloaded DMG/ZIP with the hash GitHub shows on the release asset (or in the release notes):
+
+```bash
+shasum -a 256 ~/Downloads/BC64Keys-v1.8.0.dmg
+```
 
 ### ✅ Monitor App Behavior
 
@@ -134,9 +133,9 @@ Before trusting any keyboard monitoring app:
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.6.x   | ✅ Yes             |
-| 1.5.x   | ✅ Yes             |
-| < 1.5   | ❌ No (upgrade)    |
+| 1.8.x   | ✅ Yes             |
+| 1.7.x   | ✅ Yes             |
+| < 1.7   | ❌ No (upgrade)    |
 
 We provide security updates for the **current and previous major version** only.
 
@@ -160,5 +159,5 @@ We appreciate responsible disclosure. Security researchers who report valid vuln
 
 ---
 
-**Last Updated:** 2026-01-31  
-**Contact:** badcode64 (GitHub)
+**Last Updated:** 2026-08-23  
+**Contact:** [GitHub Security Advisories](https://github.com/badcode64/BC64Keys/security/advisories)
