@@ -329,14 +329,14 @@ class L10n: ObservableObject {
             "es": "Ocultar icono del Dock", "it": "Nascondi icona del Dock", "ja": "Dockアイコンを隠す", "zh": "隐藏程序坞图标"])
     }
     var hideDockIconHint: String {
-        tr(["en": "The app stays in the menu bar. Click the B icon to show this window. If the Dock icon does not return when turned off, quit and reopen the app.",
-            "hu": "Az app a menüsorban marad. A B ikonnal nyithatod az ablakot. Ha a Dock ikon kikapcsoláskor nem jön vissza, lépj ki és indítsd újra.",
-            "de": "Die App bleibt in der Menüleiste. Klicken Sie auf das B-Symbol, um dieses Fenster anzuzeigen. Erscheint das Dock-Symbol nach dem Deaktivieren nicht, beenden Sie die App und starten Sie sie neu.",
-            "fr": "L'app reste dans la barre de menus. Cliquez sur l'icône B pour afficher cette fenêtre. Si l'icône du Dock ne réapparaît pas, quittez puis relancez l'app.",
-            "es": "La app permanece en la barra de menús. Haz clic en el icono B para mostrar esta ventana. Si el icono del Dock no vuelve, cierra y vuelve a abrir la app.",
-            "it": "L'app resta nella barra dei menu. Clicca l'icona B per mostrare questa finestra. Se l'icona del Dock non riappare, esci e riapri l'app.",
-            "ja": "アプリはメニューバーに残ります。Bアイコンをクリックするとこのウィンドウが表示されます。Dockアイコンが戻らない場合は、終了して再起動してください。",
-            "zh": "应用会留在菜单栏。点击 B 图标可显示此窗口。如果关闭后程序坞图标未恢复，请退出并重新打开应用。"])
+        tr(["en": "While the window is closed, the app stays only in the menu bar. Click the B icon to show the window (Dock icon returns until you close it). Right-click B for Quit.",
+            "hu": "Ha az ablak zárva van, az app csak a menüsorban marad. A B ikonra kattintva előjön az ablak (addig a Dock ikon is látszik). Jobb klikk a B-re: Kilépés.",
+            "de": "Ist das Fenster geschlossen, bleibt die App nur in der Menüleiste. Klicken Sie auf B, um das Fenster zu zeigen (Dock-Symbol erscheint bis zum Schließen). Rechtsklick auf B: Beenden.",
+            "fr": "Fenêtre fermée = app uniquement dans la barre de menus. Cliquez sur B pour l'afficher (l'icône du Dock revient jusqu'à la fermeture). Clic droit sur B: Quitter.",
+            "es": "Con la ventana cerrada, la app solo está en la barra de menús. Clic en B para mostrar la ventana (el Dock vuelve hasta que la cierres). Clic derecho en B: Salir.",
+            "it": "Con la finestra chiusa l'app resta solo nella barra menu. Clic su B per mostrarla (l'icona Dock torna finché non la chiudi). Clic destro su B: Esci.",
+            "ja": "ウィンドウを閉じるとメニューバーのみ。Bをクリックで表示（閉じるまでDockに戻ります）。Bを右クリックで終了。",
+            "zh": "窗口关闭后仅留在菜单栏。点击 B 显示窗口（关闭前程序坞图标会回来）。右键 B 可退出。"])
     }
     var menuShowWindow: String {
         tr(["en": "Show Window", "hu": "Ablak megjelenítése", "de": "Fenster einblenden", "fr": "Afficher la fenêtre",

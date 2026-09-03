@@ -15,6 +15,9 @@ import ServiceManagement
 //   - blocks them (discard), or
 //   - emits a replacement CGEvent (remap)
 //
+// v1.9.1 Features:
+// - Hide Dock Icon: temporarily become .regular when showing the window so it fronts / Cmd-Tab works
+//
 // v1.9.0 Features:
 // - Optional Hide Dock Icon: run from the menu bar, click B to show the window
 //
@@ -249,21 +252,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         statusMenu = menu
     }
     
-    // Only the Dock presence changes here; the window is left exactly as it was.
+    // Hide Dock Icon only applies while the window is hidden.
+    // While the window is open we stay .regular so activation / Cmd-Tab work.
     func applyActivationPolicy() {
         let hide = UserDefaults.standard.bool(forKey: "bc64keys.hideDockIcon")
-        let policy: NSApplication.ActivationPolicy = hide ? .accessory : .regular
+        let windowVisible = mainWindow()?.isVisible == true
+        let policy: NSApplication.ActivationPolicy =
+            (hide && !windowVisible) ? .accessory : .regular
         guard NSApp.activationPolicy() != policy else { return }
-        
-        let wasVisible = mainWindow()?.isVisible == true
         NSApp.setActivationPolicy(policy)
-        
-        // Switching policy can drop the app behind other windows
-        guard wasVisible else { return }
-        DispatchQueue.main.async {
-            NSApp.activate(ignoringOtherApps: true)
-            self.mainWindow()?.makeKeyAndOrderFront(nil)
-        }
+    }
+    
+    private func hideMainWindow() {
+        mainWindow()?.orderOut(nil)
+        applyActivationPolicy()
     }
     
     private func launchedAsLoginItem() -> Bool {
@@ -322,7 +324,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     }
     
     func showMainWindow() {
-        applyActivationPolicy()
+        // Must be .regular before activate, or the window never becomes key
+        // and the app stays out of Cmd-Tab (.accessory cannot front a window reliably).
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
         NSApp.unhide(nil)
         NSApp.activate(ignoringOtherApps: true)
         guard let window = mainWindow() else { return }
@@ -371,7 +377,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     // When status item is clicked, toggle window visibility
     @objc func statusItemClicked() {
         if let window = mainWindow(), window.isVisible, NSApp.isActive {
-            window.orderOut(nil)
+            hideMainWindow()
         } else {
             showMainWindow()
         }
@@ -379,7 +385,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     
     // Intercept window close - just hide instead of destroying
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        sender.orderOut(nil)
+        hideMainWindow()
         return false  // Don't actually close/destroy the window
     }
     
