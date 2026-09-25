@@ -15,6 +15,10 @@ import ServiceManagement
 //   - blocks them (discard), or
 //   - emits a replacement CGEvent (remap)
 //
+// v1.9.2 Features:
+// - Fix FlagsChanged NSEvent crash in Monitor (charactersIgnoringModifiers)
+// - Reduce keyboard lag: no per-keystroke debug I/O / DispatchQueue.sync; stop Monitor on tab leave
+//
 // v1.9.1 Features:
 // - Hide Dock Icon: temporarily become .regular when showing the window so it fronts / Cmd-Tab works
 //
@@ -566,7 +570,14 @@ class KeyEventMonitor: ObservableObject {
     }
     
     private func handleKeyEvent(_ event: NSEvent) {
-        let keyChar = event.charactersIgnoringModifiers ?? ""
+        // charactersIgnoringModifiers is only valid for keyDown/keyUp; on flagsChanged
+        // AppKit raises "Invalid message sent to event" (uncaught → UI freezes).
+        let keyChar: String
+        if event.type == .keyDown || event.type == .keyUp {
+            keyChar = event.charactersIgnoringModifiers ?? ""
+        } else {
+            keyChar = ""
+        }
         let modifiers = getModifierString(event.modifierFlags)
         
         // Determine event type
@@ -1400,6 +1411,9 @@ struct SettingsView: View {
                         Text(L10n.current.debugLoggingDescription)
                     }
                     .toggleStyle(.switch)
+                    .onChange(of: debugLoggingEnabled) { newValue in
+                        appDelegate.keyRemapper?.debugLoggingEnabled = newValue
+                    }
                     
                     Text(L10n.current.debugLoggingHint)
                         .font(.caption)
@@ -1483,6 +1497,12 @@ struct MonitorView: View {
                         }
                     }
                 }
+            }
+        }
+        .onDisappear {
+            // Global monitor runs on every system keystroke; leaving it on causes lag.
+            if keyMonitor.isMonitoring {
+                keyMonitor.stopMonitoring()
             }
         }
     }
@@ -2278,15 +2298,9 @@ class KeyRemapper {
     // Track Caps Lock state to detect press/release
     private var capsLockPressed: Bool = false
     
-    // Cache active app bundle ID to avoid frequent NSWorkspace calls
-    // Updated periodically via notification observer
-    // Thread-safe access via serial queue to prevent race conditions
-    private let bundleIDQueue = DispatchQueue(label: "com.bc64keys.bundleIDQueue")
-    private var _cachedBundleID: String = ""
-    private var cachedBundleID: String {
-        get { bundleIDQueue.sync { _cachedBundleID } }
-        set { bundleIDQueue.sync { _cachedBundleID = newValue } }
-    }
+    // Cached frontmost bundle ID. Tap + workspace observer both run on the main
+    // run loop, so a plain var is enough — DispatchQueue.sync per keystroke caused lag.
+    private var cachedBundleID: String = ""
     private var workspaceObserver: Any?
     
     // Public property to check if remapper is actually running (has active event tap)
@@ -2303,6 +2317,9 @@ class KeyRemapper {
             print("❌ Accessibility permission not granted")
             return
         }
+        
+        // Idempotent: drop any previous tap/observer before creating a new one
+        stopRemapping()
         
         // Initialize cached bundle ID
         cachedBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
@@ -2331,7 +2348,7 @@ class KeyRemapper {
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
                 // Safety check: refcon should never be nil, but guard against it
                 guard let refcon = refcon else {
-                    return Unmanaged.passRetained(event)
+                    return Unmanaged.passUnretained(event)
                 }
                 let remapper = Unmanaged<KeyRemapper>.fromOpaque(refcon).takeUnretainedValue()
                 return remapper.handleEvent(proxy: proxy, type: type, event: event)
@@ -2376,12 +2393,12 @@ class KeyRemapper {
             if let eventTap = eventTap {
                 CGEvent.tapEnable(tap: eventTap, enable: true)
             }
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
         
         // Process key events and flags changed (for Caps Lock and modifiers)
         guard type == .keyDown || type == .keyUp || type == .flagsChanged else {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
         
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
@@ -2422,18 +2439,16 @@ class KeyRemapper {
             return handleKeyMapping(keyCode: keyCode, eventFlags: eventFlags, isKeyDown: type == .keyDown, originalEvent: event)
         }
         
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
     
     private func findMatchingMapping(keyCode: UInt16, eventFlags: CGEventFlags) -> KeyMappingRule? {
         guard let manager = mappingManager else { return nil }
-        let mappings = manager.mappings.filter({ $0.isEnabled })
-        if mappings.isEmpty { return nil }
-        
         let activeBundleID = cachedBundleID
         
-        for mapping in mappings {
-            guard keyCode == mapping.sourceKeyCode else { continue }
+        // Iterate in place — avoid allocating a filtered copy on every keystroke
+        for mapping in manager.mappings {
+            guard mapping.isEnabled, keyCode == mapping.sourceKeyCode else { continue }
             
             let shouldApply: Bool
             switch mapping.appFilterMode {
@@ -2485,16 +2500,13 @@ class KeyRemapper {
     }
     
     private func handleKeyMapping(keyCode: UInt16, eventFlags: CGEventFlags, isKeyDown: Bool, originalEvent: CGEvent? = nil) -> Unmanaged<CGEvent>? {
-        if debugLoggingEnabled && !cachedBundleID.isEmpty {
-            print("🎯 Active app: \(cachedBundleID)")
-        }
-        
         guard let mapping = findMatchingMapping(keyCode: keyCode, eventFlags: eventFlags) else {
             return passThrough(originalEvent: originalEvent, keyCode: keyCode, eventFlags: eventFlags, isKeyDown: isKeyDown)
         }
         
+        // Log only when a remap actually applies — never on the unmapped hot path
         if debugLoggingEnabled {
-            print("🔍 Filter: mode=\(mapping.appFilterMode), activeBundleID=\(cachedBundleID), filtered=\(mapping.filteredApps)")
+            print("🔀 Remap \(keyCode) → \(mapping.targetKeyCode) [\(cachedBundleID)]")
         }
         
         if mapping.targetKeyCode == 0 && mapping.targetModifiers == nil &&

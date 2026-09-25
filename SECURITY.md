@@ -98,7 +98,7 @@ Before trusting any keyboard monitoring app:
 3. Compare the SHA-256 of the downloaded DMG/ZIP with the hash GitHub shows on the release asset (or in the release notes):
 
 ```bash
-shasum -a 256 ~/Downloads/BC64Keys-v1.9.1.dmg
+shasum -a 256 ~/Downloads/BC64Keys-v1.9.2.dmg
 ```
 
 ### ✅ Monitor App Behavior
