@@ -26,8 +26,8 @@ Choose your preferred format:
 SHA-256 (GitHub release assets):
 
 ```
-TBD  BC64Keys-v1.9.2.dmg
-TBD  BC64Keys-v1.9.2-notarized.zip
+8c0b9a69664761e771bdff89ffcb379dd9851912b304d4a5d4564fb5025d69f9  BC64Keys-v1.9.2.dmg
+9e80c9414f897b66f18a83391ac2550ee71bbf3df8007f1d2e1d7d7b4769ea24  BC64Keys-v1.9.2-notarized.zip
 ```
 
 ## Installation
