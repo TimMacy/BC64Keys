@@ -120,6 +120,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     var statusItem: NSStatusItem?
     private var statusMenu: NSMenu?
     private var mainWindowRef: NSWindow?
+    private var isRemappingSuspended = false
     
     // Track previous state to avoid spamming logs
     private var previousAccessibilityState: Bool?
@@ -129,6 +130,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     // This reduces SSD wear and avoids logging sensitive keystroke patterns by default.
     @AppStorage("bc64keys.debugLogging") var debugLoggingEnabled: Bool = false
     @AppStorage("bc64keys.hideDockIcon") var hideDockIcon: Bool = false
+    @AppStorage("bc64keys.rulesEnabled") var rulesEnabled: Bool = true
     
     // Prefer a per-user log location instead of /tmp to reduce information exposure and
     // avoid symlink-related file clobbering risks.
@@ -408,7 +410,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         let remapperRunning = keyRemapper?.isRunning ?? false
         
         // Update UI
-        statusManager.update(accessibility: hasAccessibility, remapperRunning: remapperRunning)
+        statusManager.update(accessibility: hasAccessibility, remapperRunning: remapperRunning && rulesEnabled)
         
         // Only log if state changed to avoid spamming and performance impact
         let stateChanged = (previousAccessibilityState != hasAccessibility) || (previousRemapperState != remapperRunning)
@@ -471,11 +473,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     }
     
     func startRemapping() {
+        guard !isRemappingSuspended else { return }
         log("")
         log("==================================================")
         log("🎬 startRemapping() CALLED")
         log("==================================================")
-        keyRemapper = KeyRemapper(mappingManager: mappingManager)
+        keyRemapper = KeyRemapper(mappingManager: mappingManager, onToggleRules: { [weak self] in
+            guard let self else { return }
+            self.setRulesEnabled(!self.rulesEnabled)
+        })
+        keyRemapper?.setRulesEnabled(rulesEnabled)
         keyRemapper?.debugLoggingEnabled = debugLoggingEnabled
         keyRemapper?.startRemapping()
         log("🔚 startRemapping() FINISHED")
@@ -492,6 +499,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     // Used when capturing keys for new/edited mappings to ensure we capture the original key,
     // not the already-remapped key.
     func suspendRemapping() {
+        isRemappingSuspended = true
         keyRemapper?.stopRemapping()
         log("⏸️  Remapper temporarily suspended for key capture")
         // Update status to reflect suspended state
@@ -500,14 +508,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     }
     
     func resumeRemapping() {
+        isRemappingSuspended = false
         if AXIsProcessTrusted(), keyRemapper != nil {
+            keyRemapper?.setRulesEnabled(rulesEnabled)
             keyRemapper?.startRemapping()
             log("▶️  Remapper resumed after key capture")
             // Update status to reflect running state
-            statusManager.update(accessibility: true, remapperRunning: keyRemapper?.isRunning ?? false)
+            statusManager.update(accessibility: true, remapperRunning: (keyRemapper?.isRunning ?? false) && rulesEnabled)
         }
     }
     
+    func setRulesEnabled(_ enabled: Bool) {
+        rulesEnabled = enabled
+        keyRemapper?.setRulesEnabled(enabled)
+        checkAndReportStatus()
+    }
+
+    func clearAllRules() {
+        keyRemapper?.stopRemapping()
+        mappingManager.clearAllMappings()
+        checkAndReportStatus()
+    }
+
     deinit {
         // Cleanup resources (timer, status item, remapper)
         statusCheckTimer?.invalidate()
@@ -648,18 +670,52 @@ enum AppFilterMode: String, Codable {
     case include  // Apply only to these apps
 }
 
+enum SystemAction: Codable, Hashable {
+    case toggleRules
+    case unknown(String)
+
+    init(from decoder: Decoder) throws {
+        let identifier = try decoder.singleValueContainer().decode(String.self)
+        switch identifier {
+        case "rules.toggle", "toggleRules": self = .toggleRules
+        default: self = .unknown(identifier)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .toggleRules: try container.encode("rules.toggle")
+        case .unknown(let identifier): try container.encode(identifier)
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .toggleRules: return "Toggle keys (enable/disable rules)"
+        case .unknown(let identifier): return "Unsupported action: \(identifier)"
+        }
+    }
+}
+
 struct NavigationAction: Identifiable, Codable, Hashable {
     let id = UUID()
     let name: String
     let key: UInt16
     let modifiers: CGEventFlags
-    
-    init(name: String, key: UInt16, modifiers: CGEventFlags) {
+    let systemAction: SystemAction?
+
+    init(name: String, key: UInt16, modifiers: CGEventFlags, systemAction: SystemAction? = nil) {
         self.name = name
         self.key = key
         self.modifiers = modifiers
+        self.systemAction = systemAction
     }
-    
+
+    func matches(_ mapping: KeyMappingRule) -> Bool {
+        systemAction == mapping.systemAction && key == mapping.targetKeyCode && modifiers == mapping.targetModifiers
+    }
+
     // Localized display name for UI
     var localizedName: String {
         // Extract action type from English name for localization
@@ -739,33 +795,35 @@ struct NavigationAction: Identifiable, Codable, Hashable {
         }
         return name // Fallback to English name
     }
-    
+
     // Hashable conformance
     static func == (lhs: NavigationAction, rhs: NavigationAction) -> Bool {
         lhs.id == rhs.id
     }
-    
+
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
-    
+
     enum CodingKeys: String, CodingKey {
-        case name, key, modifiers
+        case name, key, modifiers, systemAction
     }
-    
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decode(String.self, forKey: .name)
         key = try container.decode(UInt16.self, forKey: .key)
         let rawModifiers = try container.decode(UInt64.self, forKey: .modifiers)
         modifiers = CGEventFlags(rawValue: rawModifiers)
+        systemAction = try container.decodeIfPresent(SystemAction.self, forKey: .systemAction)
     }
-    
+
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(name, forKey: .name)
         try container.encode(key, forKey: .key)
         try container.encode(modifiers.rawValue, forKey: .modifiers)
+        try container.encodeIfPresent(systemAction, forKey: .systemAction)
     }
 }
 
@@ -773,6 +831,8 @@ struct NavigationAction: Identifiable, Codable, Hashable {
 extension NavigationAction {
     // Predefined navigation actions - optimized for Windows switchers
     static let all: [NavigationAction] = [
+        NavigationAction(name: SystemAction.toggleRules.name, key: 0, modifiers: [], systemAction: .toggleRules),
+
         // === SPECIAL (block key - targetKeyCode 0 with no modifiers means discard) ===
         NavigationAction(name: "🚫 Discard (block key)", key: 0, modifiers: []),
         
@@ -976,16 +1036,17 @@ struct KeyMappingRule: Identifiable, Codable {
     var targetKeyName: String
     var targetModifiers: CGEventFlags? // For navigation actions
     var targetCharacter: String? // Unicode character to send (from visual keyboard)
+    var systemAction: SystemAction?
     var isEnabled: Bool
-    
+
     // Per-app filtering
     var appFilterMode: AppFilterMode
     var filteredApps: [String] // Bundle IDs
-    
+
     init(id: UUID = UUID(), type: MappingType, sourceKeyCode: UInt16, sourceKeyName: String,
-         sourceModifiers: CGEventFlags? = nil, targetKeyCode: UInt16, targetKeyName: String, 
+         sourceModifiers: CGEventFlags? = nil, targetKeyCode: UInt16, targetKeyName: String,
          targetModifiers: CGEventFlags? = nil, targetCharacter: String? = nil, isEnabled: Bool = true,
-         appFilterMode: AppFilterMode = .all, filteredApps: [String] = []) {
+         appFilterMode: AppFilterMode = .all, filteredApps: [String] = [], systemAction: SystemAction? = nil) {
         self.id = id
         self.type = type
         self.sourceKeyCode = sourceKeyCode
@@ -995,15 +1056,16 @@ struct KeyMappingRule: Identifiable, Codable {
         self.targetKeyName = targetKeyName
         self.targetModifiers = targetModifiers
         self.targetCharacter = targetCharacter
+        self.systemAction = systemAction
         self.isEnabled = isEnabled
         self.appFilterMode = appFilterMode
         self.filteredApps = filteredApps
     }
-    
+
     enum CodingKeys: String, CodingKey {
-        case id, type, sourceKeyCode, sourceKeyName, sourceModifiers, targetKeyCode, targetKeyName, targetModifiers, targetCharacter, isEnabled, appFilterMode, filteredApps
+        case id, type, sourceKeyCode, sourceKeyName, sourceModifiers, targetKeyCode, targetKeyName, targetModifiers, targetCharacter, isEnabled, appFilterMode, filteredApps, systemAction
     }
-    
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
@@ -1023,13 +1085,14 @@ struct KeyMappingRule: Identifiable, Codable {
             targetModifiers = nil
         }
         targetCharacter = try container.decodeIfPresent(String.self, forKey: .targetCharacter)
+        systemAction = try container.decodeIfPresent(SystemAction.self, forKey: .systemAction)
         isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
-        
+
         // Per-app filtering (with defaults for backward compatibility)
         appFilterMode = try container.decodeIfPresent(AppFilterMode.self, forKey: .appFilterMode) ?? .all
         filteredApps = try container.decodeIfPresent([String].self, forKey: .filteredApps) ?? []
     }
-    
+
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
@@ -1041,6 +1104,7 @@ struct KeyMappingRule: Identifiable, Codable {
         try container.encode(targetKeyName, forKey: .targetKeyName)
         try container.encodeIfPresent(targetModifiers?.rawValue, forKey: .targetModifiers)
         try container.encodeIfPresent(targetCharacter, forKey: .targetCharacter)
+        try container.encodeIfPresent(systemAction, forKey: .systemAction)
         try container.encode(isEnabled, forKey: .isEnabled)
         try container.encode(appFilterMode, forKey: .appFilterMode)
         try container.encode(filteredApps, forKey: .filteredApps)
@@ -1088,6 +1152,10 @@ class KeyMappingManager: ObservableObject {
         }
     }
     
+    func clearAllMappings() {
+        mappings.removeAll()
+    }
+
     private func saveMappings() {
         // JSON encoding for ~20 mappings is <1ms - no need for background queue
         // Background queue would add overhead and potential race conditions
@@ -1188,7 +1256,7 @@ struct ContentView: View {
                     }
                     .tag(1)
                 
-                SettingsView()
+                SettingsView(mappingManager: mappingManager)
                     .tabItem {
                         Label(L10n.current.tabSettings, systemImage: "gear")
                     }
@@ -1285,17 +1353,20 @@ struct StatusBar: View {
 // MARK: - Settings View
 struct SettingsView: View {
     @EnvironmentObject var appDelegate: AppDelegate
+    @ObservedObject var mappingManager: KeyMappingManager
     @ObservedObject var l10n = L10n.shared
     @StateObject private var launchManager = LaunchAtLoginManager()
     @AppStorage("selectedLanguage") private var selectedLanguageRaw: String = AppLanguage.system.rawValue
     @AppStorage("bc64keys.debugLogging") private var debugLoggingEnabled: Bool = false
     @AppStorage("bc64keys.hideDockIcon") private var hideDockIcon: Bool = false
-    
+    @AppStorage("bc64keys.rulesEnabled") private var rulesEnabled: Bool = true
+    @State private var showClearRulesConfirmation = false
+
     private var selectedLanguage: AppLanguage {
         get { AppLanguage(rawValue: selectedLanguageRaw) ?? .system }
         set { selectedLanguageRaw = newValue.rawValue }
     }
-    
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -1303,127 +1374,166 @@ struct SettingsView: View {
                 Text(L10n.current.settingsTitle)
                     .font(.title2)
                     .fontWeight(.bold)
-                
+
                 Spacer()
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .background(Color(NSColor.controlBackgroundColor))
-            
+
             Divider()
-            
+
             // Settings Content - Compact but readable
-            VStack(alignment: .leading, spacing: 16) {
-                // Launch at Login + Language - Single row
-                HStack(spacing: 20) {
-                    // Launch at Login
-                    Label(L10n.current.launchAtLogin, systemImage: "power")
-                        .font(.headline)
-                    
-                    Toggle("", isOn: Binding(
-                        get: { launchManager.isEnabled },
-                        set: { _ in launchManager.toggle() }
-                    ))
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-                    
-                    Spacer()
-                    
-                    // Language
-                    Label(L10n.current.language, systemImage: "globe")
-                        .font(.headline)
-                    
-                    Picker("", selection: Binding(
-                        get: { selectedLanguage },
-                        set: { newValue in
-                            selectedLanguageRaw = newValue.rawValue
-                            L10n.shared.setLanguage(newValue)
-                        }
-                    )) {
-                        ForEach(AppLanguage.allCases, id: \.self) { lang in
-                            Text(lang.displayName).tag(lang)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(width: 150)
-                }
-                .padding(12)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
-                
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Label(L10n.current.hideDockIcon, systemImage: "macwindow")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Launch at Login + Language - Single row
+                    HStack(spacing: 20) {
+                        // Launch at Login
+                        Label(L10n.current.launchAtLogin, systemImage: "power")
                             .font(.headline)
-                        
+
                         Toggle("", isOn: Binding(
-                            get: { hideDockIcon },
-                            set: { newValue in
-                                hideDockIcon = newValue
-                                appDelegate.applyActivationPolicy()
-                            }
+                            get: { launchManager.isEnabled },
+                            set: { _ in launchManager.toggle() }
                         ))
                         .toggleStyle(.switch)
                         .labelsHidden()
-                        
+
                         Spacer()
-                    }
-                    
-                    Text(L10n.current.hideDockIconHint)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding(12)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
-                
-                // Support Section - Centered, prominent, no extra text
-                VStack(spacing: 12) {
-                    Button(action: {
-                        guard let url = URL(string: "https://buymeacoffee.com/badcode64") else { return }
-                        NSWorkspace.shared.open(url)
-                    }) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "cup.and.saucer.fill")
-                            Text(L10n.current.supportButton)
+
+                        // Language
+                        Label(L10n.current.language, systemImage: "globe")
+                            .font(.headline)
+
+                        Picker("", selection: Binding(
+                            get: { selectedLanguage },
+                            set: { newValue in
+                                selectedLanguageRaw = newValue.rawValue
+                                L10n.shared.setLanguage(newValue)
+                            }
+                        )) {
+                            ForEach(AppLanguage.allCases, id: \.self) { lang in
+                                Text(lang.displayName).tag(lang)
+                            }
                         }
-                        .font(.body)
-                        .frame(maxWidth: 300)
-                        .padding(.vertical, 10)
+                        .pickerStyle(.menu)
+                        .frame(width: 150)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.pink)
+                    .padding(12)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label(L10n.current.hideDockIcon, systemImage: "macwindow")
+                                .font(.headline)
+
+                            Toggle("", isOn: Binding(
+                                get: { hideDockIcon },
+                                set: { newValue in
+                                    hideDockIcon = newValue
+                                    appDelegate.applyActivationPolicy()
+                                }
+                            ))
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+
+                            Spacer()
+                        }
+
+                        Text(L10n.current.hideDockIconHint)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(12)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label(L10n.current.enableRules, systemImage: "arrow.left.arrow.right")
+                                .font(.headline)
+
+                            Toggle("", isOn: Binding(
+                                get: { rulesEnabled },
+                                set: { appDelegate.setRulesEnabled($0) }
+                            ))
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+
+                            Spacer()
+
+                            Button(L10n.current.clearAllRules, role: .destructive) {
+                                showClearRulesConfirmation = true
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(mappingManager.mappings.isEmpty)
+                        }
+
+                        Text(L10n.current.enableRulesHint)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(12)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
+
+                    // Support Section - Centered, prominent, no extra text
+                    VStack(spacing: 12) {
+                        Button(action: {
+                            guard let url = URL(string: "https://buymeacoffee.com/badcode64") else { return }
+                            NSWorkspace.shared.open(url)
+                        }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "cup.and.saucer.fill")
+                                Text(L10n.current.supportButton)
+                            }
+                            .font(.body)
+                            .frame(maxWidth: 300)
+                            .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.pink)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(12)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
+
+                    Spacer()
+
+                    // Debug Logging Section - At the bottom (rarely used)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(L10n.current.debugLogging, systemImage: "ladybug.fill")
+                            .font(.headline)
+                            .foregroundColor(.orange)
+
+                        Toggle(isOn: $debugLoggingEnabled) {
+                            Text(L10n.current.debugLoggingDescription)
+                        }
+                        .toggleStyle(.switch)
+                        .onChange(of: debugLoggingEnabled) { newValue in
+                            appDelegate.keyRemapper?.debugLoggingEnabled = newValue
+                        }
+
+                        Text(L10n.current.debugLoggingHint)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(12)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(12)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
-                
-                Spacer()
-                
-                // Debug Logging Section - At the bottom (rarely used)
-                VStack(alignment: .leading, spacing: 8) {
-                    Label(L10n.current.debugLogging, systemImage: "ladybug.fill")
-                        .font(.headline)
-                        .foregroundColor(.orange)
-                    
-                    Toggle(isOn: $debugLoggingEnabled) {
-                        Text(L10n.current.debugLoggingDescription)
-                    }
-                    .toggleStyle(.switch)
-                    .onChange(of: debugLoggingEnabled) { newValue in
-                        appDelegate.keyRemapper?.debugLoggingEnabled = newValue
-                    }
-                    
-                    Text(L10n.current.debugLoggingHint)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding(12)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
+                .padding(16)
             }
-            .padding(16)
+        }
+        .alert(L10n.current.clearAllRulesTitle, isPresented: $showClearRulesConfirmation) {
+            Button(L10n.current.cancel, role: .cancel) { }
+            Button(L10n.current.clearAllRules, role: .destructive) {
+                appDelegate.clearAllRules()
+            }
+        } message: {
+            Text(L10n.current.clearAllRulesMessage)
         }
     }
 }
@@ -1703,8 +1813,7 @@ struct MappingRow: View {
         // For navigation type, find action by keyCode and modifiers (language-independent)
         if mapping.type == .navigation {
             if let action = NavigationAction.all.first(where: { 
-                $0.key == mapping.targetKeyCode && 
-                $0.modifiers == mapping.targetModifiers 
+                $0.matches(mapping)
             }) {
                 return action.localizedName
             }
@@ -2108,8 +2217,7 @@ struct AddMappingSheet: View {
                 
                 if mapping.type == .navigation {
                     selectedNavigationAction = NavigationAction.all.first {
-                        $0.key == mapping.targetKeyCode &&
-                        $0.modifiers == mapping.targetModifiers
+                        $0.matches(mapping)
                     }
                 }
                 
@@ -2171,7 +2279,8 @@ struct AddMappingSheet: View {
                 targetKeyName: action.name,
                 targetModifiers: action.modifiers,
                 appFilterMode: appFilterMode,
-                filteredApps: Array(selectedAppBundleIDs)
+                filteredApps: Array(selectedAppBundleIDs),
+                systemAction: action.systemAction
             )
             if let editingMapping = editingMapping {
                 manager.updateMapping(editingMapping, with: mapping)
@@ -2288,6 +2397,170 @@ struct KeyEventRow: View {
     }
 }
 
+// MARK: - Held mapping state
+// A press owns its mapping until release, independent of later rule/app changes.
+struct RemappingState {
+    static let eventTag: Int64 = 0x424336344B657973
+    private static let userFlags: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand]
+    private var rulesEnabled = true
+    private var activeMappings: [UInt16: KeyMappingRule] = [:]
+    private var pressedKeys: Set<UInt16> = []
+    private var capsLockPressed = false
+    private var capsLockMapped = false
+    private var lastFlags: CGEventFlags = []
+
+    mutating func synchronize(flags: CGEventFlags, heldKeys: Set<UInt16>) {
+        lastFlags = flags
+        pressedKeys = heldKeys
+        capsLockPressed = flags.contains(.maskAlphaShift)
+        capsLockMapped = false
+    }
+
+    mutating func setRulesEnabled(_ enabled: Bool, physicalFlags: CGEventFlags? = nil) -> [CGEvent] {
+        guard rulesEnabled != enabled else { return [] }
+        rulesEnabled = enabled
+        // Keep the toggle's held press and key-up paired while releasing other mappings.
+        // Retain pressedKeys so held keys don't start remapping midway through a press.
+        return enabled ? [] : releaseMappings(physicalFlags: physicalFlags, keepingToggle: true)
+    }
+
+    private func isDiscard(_ mapping: KeyMappingRule) -> Bool {
+        mapping.systemAction == nil && mapping.type == .navigation && mapping.targetKeyCode == 0 &&
+            mapping.targetModifiers == nil && (mapping.targetCharacter?.isEmpty ?? true)
+    }
+
+    private func findMatchingMapping(keyCode: UInt16, eventFlags: CGEventFlags,
+                                     mappings: [KeyMappingRule], bundleID: String) -> KeyMappingRule? {
+        mappings.first { mapping in
+            guard mapping.isEnabled && mapping.sourceKeyCode == keyCode &&
+                  (rulesEnabled || mapping.systemAction == .toggleRules) else { return false }
+            switch mapping.appFilterMode {
+            case .all: break
+            case .exclude:
+                if mapping.filteredApps.contains(bundleID) { return false }
+            case .include:
+                if !mapping.filteredApps.contains(bundleID) { return false }
+            }
+            if let required = mapping.sourceModifiers {
+                return eventFlags.intersection(Self.userFlags) == required.intersection(Self.userFlags)
+            }
+            return eventFlags.intersection(Self.userFlags).isEmpty
+        }
+    }
+
+    private func output(mapping: KeyMappingRule, isKeyDown: Bool, flags: CGEventFlags,
+                        originalEvent: CGEvent? = nil) -> CGEvent? {
+        guard mapping.systemAction == nil && !isDiscard(mapping) else { return nil }
+        if let character = mapping.targetCharacter, !character.isEmpty {
+            guard isKeyDown, let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else { return nil }
+            var unicode = Array(character.utf16)
+            event.keyboardSetUnicodeString(stringLength: unicode.count, unicodeString: &unicode)
+            event.flags = mapping.sourceModifiers == nil ? flags : []
+            event.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
+            return event
+        }
+        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: mapping.targetKeyCode, keyDown: isKeyDown) else { return nil }
+        event.flags = mapping.targetModifiers ?? (mapping.sourceModifiers == nil ? flags : [])
+        if let originalEvent = originalEvent {
+            event.setIntegerValueField(.keyboardEventAutorepeat, value: originalEvent.getIntegerValueField(.keyboardEventAutorepeat))
+        }
+        event.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
+        return event
+    }
+
+    mutating func process(type: CGEventType, event: CGEvent, mappings: [KeyMappingRule], bundleID: String, debugLoggingEnabled: Bool = false, performSystemAction: (SystemAction) -> Void = { _ in }) -> [CGEvent] {
+        guard event.getIntegerValueField(.eventSourceUserData) != Self.eventTag else { return [event] }
+        let flags = event.flags
+        lastFlags = flags
+        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+
+        if type == .flagsChanged && keyCode == 57 {
+            let active = flags.contains(.maskAlphaShift)
+            defer { capsLockPressed = active }
+            // Caps Lock changes state on every press; either transition can toggle rules.
+            if active != capsLockPressed,
+               let mapping = findMatchingMapping(keyCode: 57, eventFlags: flags, mappings: mappings, bundleID: bundleID),
+               mapping.systemAction == .toggleRules {
+                capsLockMapped = active
+                performSystemAction(.toggleRules)
+                return []
+            }
+            if active && !capsLockPressed {
+                let matchingFlags = flags
+                if let mapping = findMatchingMapping(keyCode: 57, eventFlags: matchingFlags, mappings: mappings, bundleID: bundleID) {
+                    capsLockMapped = true
+                    activeMappings[57] = mapping
+                    if let action = mapping.systemAction { performSystemAction(action) }
+                    let down = output(mapping: mapping, isKeyDown: true, flags: flags)
+                    activeMappings.removeValue(forKey: 57)
+                    let up = output(mapping: mapping, isKeyDown: false, flags: flags)
+                    return [down, up].compactMap { $0 }
+                }
+            } else if !active && capsLockPressed && capsLockMapped {
+                capsLockMapped = false
+                return []
+            }
+            event.flags = flags
+            return [event]
+        }
+
+        guard type == .keyDown || type == .keyUp else {
+            event.flags = flags
+            return [event]
+        }
+        let isKeyDown = type == .keyDown
+        if isKeyDown {
+            let firstPress = pressedKeys.insert(keyCode).inserted
+            if firstPress {
+                let matchingFlags = flags
+                if let mapping = findMatchingMapping(keyCode: keyCode, eventFlags: matchingFlags, mappings: mappings, bundleID: bundleID) {
+                    activeMappings[keyCode] = mapping
+                    if debugLoggingEnabled {
+                        print("🔀 Remap \(keyCode) → \(mapping.targetKeyCode) [\(bundleID)]")
+                    }
+                }
+            }
+            if let mapping = activeMappings[keyCode] {
+                if let action = mapping.systemAction {
+                    if firstPress { performSystemAction(action) }
+                    return []
+                }
+                return [output(mapping: mapping, isKeyDown: true, flags: flags, originalEvent: event)].compactMap { $0 }
+            }
+        } else {
+            pressedKeys.remove(keyCode)
+            if let mapping = activeMappings.removeValue(forKey: keyCode) {
+                let outputFlags = flags
+                return [output(mapping: mapping, isKeyDown: false, flags: outputFlags, originalEvent: event)].compactMap { $0 }
+            }
+        }
+        event.flags = flags
+        return [event]
+    }
+
+    // Balance emitted presses on stop, capture suspension, termination, or a disabled tap.
+    mutating func releaseAll(physicalFlags: CGEventFlags? = nil) -> [CGEvent] {
+        let events = releaseMappings(physicalFlags: physicalFlags)
+        pressedKeys.removeAll()
+        capsLockMapped = false
+        return events
+    }
+
+    private mutating func releaseMappings(physicalFlags: CGEventFlags?, keepingToggle: Bool = false) -> [CGEvent] {
+        let flags = physicalFlags ?? lastFlags
+        let keys = activeMappings.keys.filter { !keepingToggle || activeMappings[$0]?.systemAction != .toggleRules }.sorted()
+        var events: [CGEvent] = []
+        for keyCode in keys {
+            guard let mapping = activeMappings.removeValue(forKey: keyCode) else { continue }
+            let outputFlags = flags
+            if let event = output(mapping: mapping, isKeyDown: false, flags: outputFlags) {
+                events.append(event)
+            }
+        }
+        return events
+    }
+}
+
 // MARK: - Key Remapper using CGEventTap
 class KeyRemapper {
     private var eventTap: CFMachPort?
@@ -2295,8 +2568,8 @@ class KeyRemapper {
     weak var mappingManager: KeyMappingManager?
     var debugLoggingEnabled: Bool = false
     
-    // Track Caps Lock state to detect press/release
-    private var capsLockPressed: Bool = false
+    private var state = RemappingState()
+    private let onToggleRules: () -> Void
     
     // Cached frontmost bundle ID. Tap + workspace observer both run on the main
     // run loop, so a plain var is enough — DispatchQueue.sync per keystroke caused lag.
@@ -2308,8 +2581,22 @@ class KeyRemapper {
         return eventTap != nil
     }
     
-    init(mappingManager: KeyMappingManager) {
+    init(mappingManager: KeyMappingManager, onToggleRules: @escaping () -> Void = {}) {
         self.mappingManager = mappingManager
+        self.onToggleRules = onToggleRules
+    }
+
+    func setRulesEnabled(_ enabled: Bool) {
+        for event in state.setRulesEnabled(enabled, physicalFlags: CGEventSource.flagsState(.hidSystemState)) {
+            event.post(tap: .cgSessionEventTap)
+        }
+    }
+
+    private func performSystemAction(_ action: SystemAction) {
+        guard action == .toggleRules else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.onToggleRules()
+        }
     }
     
     func startRemapping() {
@@ -2320,6 +2607,7 @@ class KeyRemapper {
         
         // Idempotent: drop any previous tap/observer before creating a new one
         stopRemapping()
+        synchronizeState()
         
         // Initialize cached bundle ID
         cachedBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
@@ -2370,6 +2658,9 @@ class KeyRemapper {
     }
     
     func stopRemapping() {
+        for event in state.releaseAll(physicalFlags: CGEventSource.flagsState(.hidSystemState)) {
+            event.post(tap: .cgSessionEventTap)
+        }
         // Remove workspace observer
         if let observer = workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
@@ -2387,169 +2678,34 @@ class KeyRemapper {
         }
     }
     
+    private func synchronizeState() {
+        let flags = CGEventSource.flagsState(.hidSystemState)
+        let heldKeys = Set((0...127).compactMap { value -> UInt16? in
+            let key = UInt16(value)
+            return CGEventSource.keyState(.hidSystemState, key: key) ? key : nil
+        })
+        state.synchronize(flags: flags, heldKeys: heldKeys)
+    }
+
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        // Re-enable tap if it was disabled
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            for released in state.releaseAll(physicalFlags: CGEventSource.flagsState(.hidSystemState)) {
+                released.tapPostEvent(proxy)
+            }
+            synchronizeState()
             if let eventTap = eventTap {
                 CGEvent.tapEnable(tap: eventTap, enable: true)
             }
             return Unmanaged.passUnretained(event)
         }
-        
-        // Process key events and flags changed (for Caps Lock and modifiers)
-        guard type == .keyDown || type == .keyUp || type == .flagsChanged else {
-            return Unmanaged.passUnretained(event)
+        let events = state.process(type: type, event: event, mappings: mappingManager?.mappings ?? [], bundleID: cachedBundleID, debugLoggingEnabled: debugLoggingEnabled, performSystemAction: performSystemAction)
+        guard let last = events.last else { return nil }
+        for extra in events.dropLast() {
+            extra.tapPostEvent(proxy)
         }
-        
-        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-        let eventFlags = event.flags
-        
-        // Special handling for Caps Lock via flagsChanged
-        // Note: flagsChanged is triggered when ANY modifier key state changes (Shift, Cmd, Opt, Ctrl, Caps Lock),
-        // but we only handle Caps Lock here by checking the .maskAlphaShift flag.
-        // Other modifiers (Shift, Cmd, etc.) are handled via eventFlags matching in handleKeyMapping.
-        if type == .flagsChanged {
-            let capsLockActive = eventFlags.contains(.maskAlphaShift)
-            
-            if capsLockActive && !capsLockPressed {
-                capsLockPressed = true
-                if findMatchingMapping(keyCode: 57, eventFlags: eventFlags) != nil {
-                    if let down = handleKeyMapping(keyCode: 57, eventFlags: eventFlags, isKeyDown: true, originalEvent: nil)?.takeRetainedValue() {
-                        down.post(tap: .cghidEventTap)
-                    }
-                    if let up = handleKeyMapping(keyCode: 57, eventFlags: eventFlags, isKeyDown: false, originalEvent: nil)?.takeRetainedValue() {
-                        up.post(tap: .cghidEventTap)
-                    }
-                    return nil
-                }
-                return Unmanaged.passUnretained(event)
-            } else if !capsLockActive && capsLockPressed {
-                capsLockPressed = false
-                if findMatchingMapping(keyCode: 57, eventFlags: eventFlags) != nil {
-                    return nil
-                }
-                return Unmanaged.passUnretained(event)
-            }
-            
-            return Unmanaged.passUnretained(event)
-        }
-        
-        // Handle normal key events
-        if type == .keyDown || type == .keyUp {
-            return handleKeyMapping(keyCode: keyCode, eventFlags: eventFlags, isKeyDown: type == .keyDown, originalEvent: event)
-        }
-        
-        return Unmanaged.passUnretained(event)
+        return last === event ? Unmanaged.passUnretained(event) : Unmanaged.passRetained(last)
     }
-    
-    private func findMatchingMapping(keyCode: UInt16, eventFlags: CGEventFlags) -> KeyMappingRule? {
-        guard let manager = mappingManager else { return nil }
-        let activeBundleID = cachedBundleID
-        
-        // Iterate in place — avoid allocating a filtered copy on every keystroke
-        for mapping in manager.mappings {
-            guard mapping.isEnabled, keyCode == mapping.sourceKeyCode else { continue }
-            
-            let shouldApply: Bool
-            switch mapping.appFilterMode {
-            case .all:
-                shouldApply = true
-            case .exclude:
-                shouldApply = !mapping.filteredApps.contains(activeBundleID)
-            case .include:
-                shouldApply = mapping.filteredApps.contains(activeBundleID)
-            }
-            if !shouldApply { continue }
-            
-            if let requiredMods = mapping.sourceModifiers {
-                let shiftPressed = eventFlags.contains(.maskShift)
-                let cmdPressed = eventFlags.contains(.maskCommand)
-                let optPressed = eventFlags.contains(.maskAlternate)
-                let ctrlPressed = eventFlags.contains(.maskControl)
-                
-                let reqShift = requiredMods.contains(.maskShift)
-                let reqCmd = requiredMods.contains(.maskCommand)
-                let reqOpt = requiredMods.contains(.maskAlternate)
-                let reqCtrl = requiredMods.contains(.maskControl)
-                
-                if shiftPressed != reqShift || cmdPressed != reqCmd || optPressed != reqOpt || ctrlPressed != reqCtrl {
-                    continue
-                }
-            } else {
-                let hasUserModifiers = eventFlags.contains(.maskShift) ||
-                                      eventFlags.contains(.maskCommand) ||
-                                      eventFlags.contains(.maskAlternate) ||
-                                      eventFlags.contains(.maskControl)
-                if hasUserModifiers { continue }
-            }
-            
-            return mapping
-        }
-        return nil
-    }
-    
-    private func passThrough(originalEvent: CGEvent?, keyCode: UInt16, eventFlags: CGEventFlags, isKeyDown: Bool) -> Unmanaged<CGEvent>? {
-        if let originalEvent = originalEvent {
-            return Unmanaged.passUnretained(originalEvent)
-        }
-        guard let passThroughEvent = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(keyCode), keyDown: isKeyDown) else {
-            return nil
-        }
-        passThroughEvent.flags = eventFlags
-        return Unmanaged.passRetained(passThroughEvent)
-    }
-    
-    private func handleKeyMapping(keyCode: UInt16, eventFlags: CGEventFlags, isKeyDown: Bool, originalEvent: CGEvent? = nil) -> Unmanaged<CGEvent>? {
-        guard let mapping = findMatchingMapping(keyCode: keyCode, eventFlags: eventFlags) else {
-            return passThrough(originalEvent: originalEvent, keyCode: keyCode, eventFlags: eventFlags, isKeyDown: isKeyDown)
-        }
-        
-        // Log only when a remap actually applies — never on the unmapped hot path
-        if debugLoggingEnabled {
-            print("🔀 Remap \(keyCode) → \(mapping.targetKeyCode) [\(cachedBundleID)]")
-        }
-        
-        if mapping.targetKeyCode == 0 && mapping.targetModifiers == nil &&
-            mapping.type == .navigation && (mapping.targetCharacter?.isEmpty ?? true) {
-            return nil
-        }
-        if let targetChar = mapping.targetCharacter, !targetChar.isEmpty {
-            if isKeyDown {
-                guard let newEvent = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
-                    return passThrough(originalEvent: originalEvent, keyCode: keyCode, eventFlags: eventFlags, isKeyDown: isKeyDown)
-                }
-                var unicodeString = Array(targetChar.utf16)
-                newEvent.keyboardSetUnicodeString(stringLength: unicodeString.count, unicodeString: &unicodeString)
-                if mapping.sourceModifiers != nil {
-                    newEvent.flags = []
-                } else {
-                    newEvent.flags = eventFlags
-                }
-                return Unmanaged.passRetained(newEvent)
-            } else {
-                return nil
-            }
-        }
-        
-        guard let newEvent = CGEvent(
-            keyboardEventSource: nil,
-            virtualKey: CGKeyCode(mapping.targetKeyCode),
-            keyDown: isKeyDown
-        ) else {
-            return passThrough(originalEvent: originalEvent, keyCode: keyCode, eventFlags: eventFlags, isKeyDown: isKeyDown)
-        }
-        
-        if let modifiers = mapping.targetModifiers {
-            newEvent.flags = modifiers
-        } else if mapping.sourceModifiers != nil {
-            newEvent.flags = []
-        } else {
-            newEvent.flags = eventFlags
-        }
-        
-        return Unmanaged.passRetained(newEvent)
-    }
-    
+
     deinit {
         // Ensure cleanup happens even if stopRemapping wasn't explicitly called
         stopRemapping()
