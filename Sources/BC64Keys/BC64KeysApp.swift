@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Carbon
 import ServiceManagement
+import UniformTypeIdentifiers
 
 // BC64Keys
 // -------
@@ -11,7 +12,7 @@ import ServiceManagement
 // How it works (high level):
 // - UI lets the user define KeyMappingRule items (source key + optional modifiers → target key/modifiers)
 // - Rules are persisted in UserDefaults via KeyMappingManager (JSON encoded)
-// - A CGEventTap (KeyRemapper) intercepts keyDown/keyUp events and either:
+// - A CGEventTap (KeyRemapper) intercepts keyDown/keyUp/flagsChanged events and either:
 //   - blocks them (discard), or
 //   - emits a replacement CGEvent (remap)
 //
@@ -53,6 +54,66 @@ let kSpecialKeys: [UInt16: String] = [
     59: "⌃ LCtrl", 62: "⌃ RCtrl", 58: "⌥ LOpt", 61: "⌥ ROpt",
     55: "⌘ LCmd", 54: "⌘ RCmd", 63: "fn"
 ]
+
+// MARK: - Physical modifier keys
+// Device-specific masks from IOKit/hidsystem/IOLLEvent.h distinguish each side.
+struct PhysicalModifier {
+    let keyCode: UInt16
+    let flag: CGEventFlags
+    let deviceMask: UInt64
+
+    static let all: [PhysicalModifier] = [
+        .init(keyCode: 56, flag: .maskShift, deviceMask: 0x02),
+        .init(keyCode: 60, flag: .maskShift, deviceMask: 0x04),
+        .init(keyCode: 59, flag: .maskControl, deviceMask: 0x01),
+        .init(keyCode: 62, flag: .maskControl, deviceMask: 0x2000),
+        .init(keyCode: 58, flag: .maskAlternate, deviceMask: 0x20),
+        .init(keyCode: 61, flag: .maskAlternate, deviceMask: 0x40),
+        .init(keyCode: 55, flag: .maskCommand, deviceMask: 0x08),
+        .init(keyCode: 54, flag: .maskCommand, deviceMask: 0x10)
+    ]
+    static let userFlags: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand]
+
+    static func key(_ keyCode: UInt16) -> PhysicalModifier? {
+        all.first { $0.keyCode == keyCode }
+    }
+
+    func isDown(in flags: CGEventFlags) -> Bool {
+        flags.rawValue & deviceMask != 0
+    }
+
+    func removing(from flags: CGEventFlags) -> CGEventFlags {
+        var result = CGEventFlags(rawValue: flags.rawValue & ~deviceMask)
+        if !Self.all.contains(where: { $0.flag == flag && $0.isDown(in: result) }) {
+            result.remove(flag)
+        }
+        return result
+    }
+
+    func adding(to flags: CGEventFlags) -> CGEventFlags {
+        CGEventFlags(rawValue: flags.rawValue | deviceMask | flag.rawValue)
+    }
+}
+
+// Capture the actual physical modifier immediately on press.
+struct KeyCaptureState {
+    struct Selection {
+        let keyCode: UInt16
+        let flags: CGEventFlags
+    }
+
+    func capture(type: CGEventType, keyCode: UInt16, flags: CGEventFlags) -> Selection? {
+        if type == .keyDown {
+            return Selection(keyCode: keyCode, flags: flags.intersection(PhysicalModifier.userFlags))
+        }
+        guard type == .flagsChanged else { return nil }
+        if keyCode == 57 {
+            return Selection(keyCode: keyCode, flags: flags.intersection(PhysicalModifier.userFlags))
+        }
+        guard let modifier = PhysicalModifier.key(keyCode), modifier.isDown(in: flags) else { return nil }
+        return Selection(keyCode: keyCode, flags: modifier.removing(from: flags).intersection(PhysicalModifier.userFlags))
+    }
+}
 
 // MARK: - Main App
 @main
@@ -120,6 +181,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     var statusItem: NSStatusItem?
     private var statusMenu: NSMenu?
     private var mainWindowRef: NSWindow?
+    private var isRemappingSuspended = false
     
     // Track previous state to avoid spamming logs
     private var previousAccessibilityState: Bool?
@@ -129,6 +191,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     // This reduces SSD wear and avoids logging sensitive keystroke patterns by default.
     @AppStorage("bc64keys.debugLogging") var debugLoggingEnabled: Bool = false
     @AppStorage("bc64keys.hideDockIcon") var hideDockIcon: Bool = false
+    @AppStorage("bc64keys.rulesEnabled") var rulesEnabled: Bool = true
     
     // Prefer a per-user log location instead of /tmp to reduce information exposure and
     // avoid symlink-related file clobbering risks.
@@ -408,7 +471,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         let remapperRunning = keyRemapper?.isRunning ?? false
         
         // Update UI
-        statusManager.update(accessibility: hasAccessibility, remapperRunning: remapperRunning)
+        statusManager.update(accessibility: hasAccessibility, remapperRunning: remapperRunning && rulesEnabled)
         
         // Only log if state changed to avoid spamming and performance impact
         let stateChanged = (previousAccessibilityState != hasAccessibility) || (previousRemapperState != remapperRunning)
@@ -471,11 +534,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     }
     
     func startRemapping() {
+        guard !isRemappingSuspended else { return }
         log("")
         log("==================================================")
         log("🎬 startRemapping() CALLED")
         log("==================================================")
-        keyRemapper = KeyRemapper(mappingManager: mappingManager)
+        keyRemapper = KeyRemapper(mappingManager: mappingManager, onToggleRules: { [weak self] in
+            guard let self else { return }
+            self.setRulesEnabled(!self.rulesEnabled)
+        })
+        keyRemapper?.setRulesEnabled(rulesEnabled)
         keyRemapper?.debugLoggingEnabled = debugLoggingEnabled
         keyRemapper?.startRemapping()
         log("🔚 startRemapping() FINISHED")
@@ -492,6 +560,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     // Used when capturing keys for new/edited mappings to ensure we capture the original key,
     // not the already-remapped key.
     func suspendRemapping() {
+        isRemappingSuspended = true
         keyRemapper?.stopRemapping()
         log("⏸️  Remapper temporarily suspended for key capture")
         // Update status to reflect suspended state
@@ -500,14 +569,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     }
     
     func resumeRemapping() {
+        isRemappingSuspended = false
         if AXIsProcessTrusted(), keyRemapper != nil {
+            keyRemapper?.setRulesEnabled(rulesEnabled)
             keyRemapper?.startRemapping()
             log("▶️  Remapper resumed after key capture")
             // Update status to reflect running state
-            statusManager.update(accessibility: true, remapperRunning: keyRemapper?.isRunning ?? false)
+            statusManager.update(accessibility: true, remapperRunning: (keyRemapper?.isRunning ?? false) && rulesEnabled)
         }
     }
     
+    func setRulesEnabled(_ enabled: Bool) {
+        rulesEnabled = enabled
+        keyRemapper?.setRulesEnabled(enabled)
+        checkAndReportStatus()
+    }
+
+    func clearAllRules() {
+        guard mappingManager.loadError == nil else { return }
+        keyRemapper?.stopRemapping()
+        mappingManager.clearAllMappings()
+        checkAndReportStatus()
+    }
+
     deinit {
         // Cleanup resources (timer, status item, remapper)
         statusCheckTimer?.invalidate()
@@ -648,18 +732,52 @@ enum AppFilterMode: String, Codable {
     case include  // Apply only to these apps
 }
 
+enum SystemAction: Codable, Hashable {
+    case toggleRules
+    case unknown(String)
+
+    init(from decoder: Decoder) throws {
+        let identifier = try decoder.singleValueContainer().decode(String.self)
+        switch identifier {
+        case "rules.toggle", "toggleRules": self = .toggleRules
+        default: self = .unknown(identifier)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .toggleRules: try container.encode("rules.toggle")
+        case .unknown(let identifier): try container.encode(identifier)
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .toggleRules: return "Toggle keys (enable/disable rules)"
+        case .unknown(let identifier): return "Unsupported action: \(identifier)"
+        }
+    }
+}
+
 struct NavigationAction: Identifiable, Codable, Hashable {
     let id = UUID()
     let name: String
     let key: UInt16
     let modifiers: CGEventFlags
-    
-    init(name: String, key: UInt16, modifiers: CGEventFlags) {
+    let systemAction: SystemAction?
+
+    init(name: String, key: UInt16, modifiers: CGEventFlags, systemAction: SystemAction? = nil) {
         self.name = name
         self.key = key
         self.modifiers = modifiers
+        self.systemAction = systemAction
     }
-    
+
+    func matches(_ mapping: KeyMappingRule) -> Bool {
+        systemAction == mapping.systemAction && key == mapping.targetKeyCode && modifiers == mapping.targetModifiers
+    }
+
     // Localized display name for UI
     var localizedName: String {
         // Extract action type from English name for localization
@@ -739,33 +857,35 @@ struct NavigationAction: Identifiable, Codable, Hashable {
         }
         return name // Fallback to English name
     }
-    
+
     // Hashable conformance
     static func == (lhs: NavigationAction, rhs: NavigationAction) -> Bool {
         lhs.id == rhs.id
     }
-    
+
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
-    
+
     enum CodingKeys: String, CodingKey {
-        case name, key, modifiers
+        case name, key, modifiers, systemAction
     }
-    
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decode(String.self, forKey: .name)
         key = try container.decode(UInt16.self, forKey: .key)
         let rawModifiers = try container.decode(UInt64.self, forKey: .modifiers)
         modifiers = CGEventFlags(rawValue: rawModifiers)
+        systemAction = try container.decodeIfPresent(SystemAction.self, forKey: .systemAction)
     }
-    
+
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(name, forKey: .name)
         try container.encode(key, forKey: .key)
         try container.encode(modifiers.rawValue, forKey: .modifiers)
+        try container.encodeIfPresent(systemAction, forKey: .systemAction)
     }
 }
 
@@ -773,6 +893,8 @@ struct NavigationAction: Identifiable, Codable, Hashable {
 extension NavigationAction {
     // Predefined navigation actions - optimized for Windows switchers
     static let all: [NavigationAction] = [
+        NavigationAction(name: SystemAction.toggleRules.name, key: 0, modifiers: [], systemAction: .toggleRules),
+
         // === SPECIAL (block key - targetKeyCode 0 with no modifiers means discard) ===
         NavigationAction(name: "🚫 Discard (block key)", key: 0, modifiers: []),
         
@@ -976,16 +1098,17 @@ struct KeyMappingRule: Identifiable, Codable {
     var targetKeyName: String
     var targetModifiers: CGEventFlags? // For navigation actions
     var targetCharacter: String? // Unicode character to send (from visual keyboard)
+    var systemAction: SystemAction?
     var isEnabled: Bool
-    
+
     // Per-app filtering
     var appFilterMode: AppFilterMode
     var filteredApps: [String] // Bundle IDs
-    
+
     init(id: UUID = UUID(), type: MappingType, sourceKeyCode: UInt16, sourceKeyName: String,
-         sourceModifiers: CGEventFlags? = nil, targetKeyCode: UInt16, targetKeyName: String, 
+         sourceModifiers: CGEventFlags? = nil, targetKeyCode: UInt16, targetKeyName: String,
          targetModifiers: CGEventFlags? = nil, targetCharacter: String? = nil, isEnabled: Bool = true,
-         appFilterMode: AppFilterMode = .all, filteredApps: [String] = []) {
+         appFilterMode: AppFilterMode = .all, filteredApps: [String] = [], systemAction: SystemAction? = nil) {
         self.id = id
         self.type = type
         self.sourceKeyCode = sourceKeyCode
@@ -995,15 +1118,16 @@ struct KeyMappingRule: Identifiable, Codable {
         self.targetKeyName = targetKeyName
         self.targetModifiers = targetModifiers
         self.targetCharacter = targetCharacter
+        self.systemAction = systemAction
         self.isEnabled = isEnabled
         self.appFilterMode = appFilterMode
         self.filteredApps = filteredApps
     }
-    
+
     enum CodingKeys: String, CodingKey {
-        case id, type, sourceKeyCode, sourceKeyName, sourceModifiers, targetKeyCode, targetKeyName, targetModifiers, targetCharacter, isEnabled, appFilterMode, filteredApps
+        case id, type, sourceKeyCode, sourceKeyName, sourceModifiers, targetKeyCode, targetKeyName, targetModifiers, targetCharacter, isEnabled, appFilterMode, filteredApps, systemAction
     }
-    
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
@@ -1023,13 +1147,14 @@ struct KeyMappingRule: Identifiable, Codable {
             targetModifiers = nil
         }
         targetCharacter = try container.decodeIfPresent(String.self, forKey: .targetCharacter)
+        systemAction = try container.decodeIfPresent(SystemAction.self, forKey: .systemAction)
         isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
-        
+
         // Per-app filtering (with defaults for backward compatibility)
         appFilterMode = try container.decodeIfPresent(AppFilterMode.self, forKey: .appFilterMode) ?? .all
         filteredApps = try container.decodeIfPresent([String].self, forKey: .filteredApps) ?? []
     }
-    
+
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
@@ -1041,6 +1166,7 @@ struct KeyMappingRule: Identifiable, Codable {
         try container.encode(targetKeyName, forKey: .targetKeyName)
         try container.encodeIfPresent(targetModifiers?.rawValue, forKey: .targetModifiers)
         try container.encodeIfPresent(targetCharacter, forKey: .targetCharacter)
+        try container.encodeIfPresent(systemAction, forKey: .systemAction)
         try container.encode(isEnabled, forKey: .isEnabled)
         try container.encode(appFilterMode, forKey: .appFilterMode)
         try container.encode(filteredApps, forKey: .filteredApps)
@@ -1048,28 +1174,57 @@ struct KeyMappingRule: Identifiable, Codable {
 }
 
 // MARK: - Key Mapping Manager
-class KeyMappingManager: ObservableObject {
-    @Published var mappings: [KeyMappingRule] = [] {
-        didSet {
-            saveMappings()
+private struct MappingFile: Codable {
+    let version: Int
+    let mappings: [KeyMappingRule]
+}
+
+enum MappingFileError: LocalizedError {
+    case unsupportedVersion
+    case invalidRule
+    case duplicateRule
+    case unreadableSavedRules
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedVersion: return "This rules file uses an unsupported version."
+        case .invalidRule: return "The rules file contains an invalid or unsupported rule. Nothing was imported."
+        case .duplicateRule: return "The rules file contains duplicate rule IDs. Nothing was imported."
+        case .unreadableSavedRules: return "Saved rules couldn't be loaded. Import a valid rules file before exporting or changing rules."
         }
     }
-    
+}
+
+class KeyMappingManager: ObservableObject {
+    private var isLoading = false
+    @Published var mappings: [KeyMappingRule] = [] {
+        didSet {
+            if !isLoading { saveMappings() }
+        }
+    }
+    @Published private(set) var loadError: String?
+    @Published private(set) var importedFileName: String?
+
     private let userDefaultsKey = "bc64keys.mappings"
+    private let importedFileNameKey = "bc64keys.importedFileName"
+    private let defaults: UserDefaults
 
     // Persistence model:
     // - mappings[] is JSON-encoded into UserDefaults on every change (didSet)
     // - keep the structure stable for backwards compatibility (Codable)
-    
-    init() {
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         loadMappings()
     }
-    
+
     func addMapping(_ mapping: KeyMappingRule) {
+        guard loadError == nil else { return }
         mappings.append(mapping)
     }
-    
+
     func updateMapping(_ oldMapping: KeyMappingRule, with newMapping: KeyMappingRule) {
+        guard loadError == nil else { return }
         if let index = mappings.firstIndex(where: { $0.id == oldMapping.id }) {
             var updated = newMapping
             updated.id = oldMapping.id  // Keep the same ID
@@ -1108,53 +1263,87 @@ class KeyMappingManager: ObservableObject {
     }
 
     func deleteMapping(_ mapping: KeyMappingRule) {
+        guard loadError == nil else { return }
         mappings.removeAll { $0.id == mapping.id }
     }
-    
+
     func toggleMapping(_ mapping: KeyMappingRule) {
+        guard loadError == nil else { return }
         if let index = mappings.firstIndex(where: { $0.id == mapping.id }) {
             mappings[index].isEnabled.toggle()
         }
     }
-    
+
+    func clearAllMappings() {
+        guard loadError == nil else { return }
+        importedFileName = nil
+        mappings.removeAll()
+    }
+
+    func exportData() throws -> Data {
+        guard loadError == nil else { throw MappingFileError.unreadableSavedRules }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(MappingFile(version: 1, mappings: mappings))
+        let json = String(decoding: data, as: UTF8.self)
+        let formatted = json.replacingOccurrences(of: #"(?m)^([ \t]*"[^"]+") : "#, with: "$1: ", options: .regularExpression)
+        let compactArrays = formatted.replacingOccurrences(of: #"(?m)^([ \t]*"[^"]+": )\[[ \t\r\n]*\]"#, with: "$1[]", options: .regularExpression)
+        return Data(compactArrays.utf8)
+    }
+
+    func importData(_ data: Data, from url: URL? = nil) throws {
+        let file = try JSONDecoder().decode(MappingFile.self, from: data)
+        guard file.version == 1 else { throw MappingFileError.unsupportedVersion }
+        try Self.validate(file.mappings)
+        loadError = nil
+        importedFileName = url?.deletingPathExtension().lastPathComponent
+        mappings = file.mappings
+    }
+
+    private static func validate(_ mappings: [KeyMappingRule], allowUnknownActions: Bool = false) throws {
+        guard Set(mappings.map(\.id)).count == mappings.count else { throw MappingFileError.duplicateRule }
+        for mapping in mappings {
+            guard !mapping.sourceKeyName.isEmpty, mapping.sourceKeyCode <= 255,
+                  !mapping.targetKeyName.isEmpty, mapping.targetKeyCode <= 255 else {
+                throw MappingFileError.invalidRule
+            }
+            if let action = mapping.systemAction {
+                guard mapping.type == .navigation,
+                      allowUnknownActions || action == .toggleRules else {
+                    throw MappingFileError.invalidRule
+                }
+            }
+        }
+    }
+
     private func saveMappings() {
+        guard loadError == nil else { return }
         // JSON encoding for ~20 mappings is <1ms - no need for background queue
         // Background queue would add overhead and potential race conditions
         if let encoded = try? JSONEncoder().encode(mappings) {
-            UserDefaults.standard.set(encoded, forKey: userDefaultsKey)
+            defaults.set(encoded, forKey: userDefaultsKey)
+            defaults.set(importedFileName, forKey: importedFileNameKey)
         }
     }
-    
+
     private func loadMappings() {
-        guard let data = UserDefaults.standard.data(forKey: userDefaultsKey) else {
+        guard let data = defaults.data(forKey: userDefaultsKey) else {
             return
         }
-        
+
+        isLoading = true
+        defer { isLoading = false }
         do {
             let decoded = try JSONDecoder().decode([KeyMappingRule].self, from: data)
-            // Validate loaded mappings - filter out any corrupted entries
-            let validMappings = decoded.filter { mapping in
-                // Basic validation: key codes should be reasonable (0-255 for most keys)
-                // and names should not be empty
-                return !mapping.sourceKeyName.isEmpty && 
-                       mapping.sourceKeyCode <= 255 &&
-                       mapping.targetKeyCode <= 255
-            }
-            mappings = validMappings
-            
-            // Log if any mappings were filtered out
-            if validMappings.count != decoded.count {
-                #if DEBUG
-                print("⚠️ Filtered out \(decoded.count - validMappings.count) invalid mapping(s) from UserDefaults")
-                #endif
-            }
+            try Self.validate(decoded, allowUnknownActions: true)
+            mappings = decoded
+            importedFileName = defaults.string(forKey: importedFileNameKey)
         } catch {
-            // Corrupted data - log and start fresh
+            // Preserve the original bytes so a decode failure cannot erase saved rules.
+            loadError = error.localizedDescription
             #if DEBUG
             print("❌ Failed to decode mappings from UserDefaults: \(error.localizedDescription)")
             #endif
-            // Don't crash - just start with empty mappings
-            mappings = []
         }
     }
 }
@@ -1217,7 +1406,7 @@ struct ContentView: View {
                     }
                     .tag(1)
                 
-                SettingsView()
+                SettingsView(mappingManager: mappingManager)
                     .tabItem {
                         Label(L10n.current.tabSettings, systemImage: "gear")
                     }
@@ -1314,17 +1503,20 @@ struct StatusBar: View {
 // MARK: - Settings View
 struct SettingsView: View {
     @EnvironmentObject var appDelegate: AppDelegate
+    @ObservedObject var mappingManager: KeyMappingManager
     @ObservedObject var l10n = L10n.shared
     @StateObject private var launchManager = LaunchAtLoginManager()
     @AppStorage("selectedLanguage") private var selectedLanguageRaw: String = AppLanguage.system.rawValue
     @AppStorage("bc64keys.debugLogging") private var debugLoggingEnabled: Bool = false
     @AppStorage("bc64keys.hideDockIcon") private var hideDockIcon: Bool = false
-    
+    @AppStorage("bc64keys.rulesEnabled") private var rulesEnabled: Bool = true
+    @State private var showClearRulesConfirmation = false
+
     private var selectedLanguage: AppLanguage {
         get { AppLanguage(rawValue: selectedLanguageRaw) ?? .system }
         set { selectedLanguageRaw = newValue.rawValue }
     }
-    
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -1332,127 +1524,166 @@ struct SettingsView: View {
                 Text(L10n.current.settingsTitle)
                     .font(.title2)
                     .fontWeight(.bold)
-                
+
                 Spacer()
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .background(Color(NSColor.controlBackgroundColor))
-            
+
             Divider()
-            
+
             // Settings Content - Compact but readable
-            VStack(alignment: .leading, spacing: 16) {
-                // Launch at Login + Language - Single row
-                HStack(spacing: 20) {
-                    // Launch at Login
-                    Label(L10n.current.launchAtLogin, systemImage: "power")
-                        .font(.headline)
-                    
-                    Toggle("", isOn: Binding(
-                        get: { launchManager.isEnabled },
-                        set: { _ in launchManager.toggle() }
-                    ))
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-                    
-                    Spacer()
-                    
-                    // Language
-                    Label(L10n.current.language, systemImage: "globe")
-                        .font(.headline)
-                    
-                    Picker("", selection: Binding(
-                        get: { selectedLanguage },
-                        set: { newValue in
-                            selectedLanguageRaw = newValue.rawValue
-                            L10n.shared.setLanguage(newValue)
-                        }
-                    )) {
-                        ForEach(AppLanguage.allCases, id: \.self) { lang in
-                            Text(lang.displayName).tag(lang)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(width: 150)
-                }
-                .padding(12)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
-                
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Label(L10n.current.hideDockIcon, systemImage: "macwindow")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Launch at Login + Language - Single row
+                    HStack(spacing: 20) {
+                        // Launch at Login
+                        Label(L10n.current.launchAtLogin, systemImage: "power")
                             .font(.headline)
-                        
+
                         Toggle("", isOn: Binding(
-                            get: { hideDockIcon },
-                            set: { newValue in
-                                hideDockIcon = newValue
-                                appDelegate.applyActivationPolicy()
-                            }
+                            get: { launchManager.isEnabled },
+                            set: { _ in launchManager.toggle() }
                         ))
                         .toggleStyle(.switch)
                         .labelsHidden()
-                        
+
                         Spacer()
-                    }
-                    
-                    Text(L10n.current.hideDockIconHint)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding(12)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
-                
-                // Support Section - Centered, prominent, no extra text
-                VStack(spacing: 12) {
-                    Button(action: {
-                        guard let url = URL(string: "https://buymeacoffee.com/badcode64") else { return }
-                        NSWorkspace.shared.open(url)
-                    }) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "cup.and.saucer.fill")
-                            Text(L10n.current.supportButton)
+
+                        // Language
+                        Label(L10n.current.language, systemImage: "globe")
+                            .font(.headline)
+
+                        Picker("", selection: Binding(
+                            get: { selectedLanguage },
+                            set: { newValue in
+                                selectedLanguageRaw = newValue.rawValue
+                                L10n.shared.setLanguage(newValue)
+                            }
+                        )) {
+                            ForEach(AppLanguage.allCases, id: \.self) { lang in
+                                Text(lang.displayName).tag(lang)
+                            }
                         }
-                        .font(.body)
-                        .frame(maxWidth: 300)
-                        .padding(.vertical, 10)
+                        .pickerStyle(.menu)
+                        .frame(width: 150)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.pink)
+                    .padding(12)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label(L10n.current.hideDockIcon, systemImage: "macwindow")
+                                .font(.headline)
+
+                            Toggle("", isOn: Binding(
+                                get: { hideDockIcon },
+                                set: { newValue in
+                                    hideDockIcon = newValue
+                                    appDelegate.applyActivationPolicy()
+                                }
+                            ))
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+
+                            Spacer()
+                        }
+
+                        Text(L10n.current.hideDockIconHint)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(12)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label(L10n.current.enableRules, systemImage: "arrow.left.arrow.right")
+                                .font(.headline)
+
+                            Toggle("", isOn: Binding(
+                                get: { rulesEnabled },
+                                set: { appDelegate.setRulesEnabled($0) }
+                            ))
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+
+                            Spacer()
+
+                            Button(L10n.current.clearAllRules, role: .destructive) {
+                                showClearRulesConfirmation = true
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(mappingManager.mappings.isEmpty || mappingManager.loadError != nil)
+                        }
+
+                        Text(L10n.current.enableRulesHint)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(12)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
+
+                    // Support Section - Centered, prominent, no extra text
+                    VStack(spacing: 12) {
+                        Button(action: {
+                            guard let url = URL(string: "https://buymeacoffee.com/badcode64") else { return }
+                            NSWorkspace.shared.open(url)
+                        }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "cup.and.saucer.fill")
+                                Text(L10n.current.supportButton)
+                            }
+                            .font(.body)
+                            .frame(maxWidth: 300)
+                            .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.pink)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(12)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
+
+                    Spacer()
+
+                    // Debug Logging Section - At the bottom (rarely used)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(L10n.current.debugLogging, systemImage: "ladybug.fill")
+                            .font(.headline)
+                            .foregroundColor(.orange)
+
+                        Toggle(isOn: $debugLoggingEnabled) {
+                            Text(L10n.current.debugLoggingDescription)
+                        }
+                        .toggleStyle(.switch)
+                        .onChange(of: debugLoggingEnabled) { newValue in
+                            appDelegate.keyRemapper?.debugLoggingEnabled = newValue
+                        }
+
+                        Text(L10n.current.debugLoggingHint)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(12)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(12)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
-                
-                Spacer()
-                
-                // Debug Logging Section - At the bottom (rarely used)
-                VStack(alignment: .leading, spacing: 8) {
-                    Label(L10n.current.debugLogging, systemImage: "ladybug.fill")
-                        .font(.headline)
-                        .foregroundColor(.orange)
-                    
-                    Toggle(isOn: $debugLoggingEnabled) {
-                        Text(L10n.current.debugLoggingDescription)
-                    }
-                    .toggleStyle(.switch)
-                    .onChange(of: debugLoggingEnabled) { newValue in
-                        appDelegate.keyRemapper?.debugLoggingEnabled = newValue
-                    }
-                    
-                    Text(L10n.current.debugLoggingHint)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding(12)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
+                .padding(16)
             }
-            .padding(16)
+        }
+        .alert(L10n.current.clearAllRulesTitle, isPresented: $showClearRulesConfirmation) {
+            Button(L10n.current.cancel, role: .cancel) { }
+            Button(L10n.current.clearAllRules, role: .destructive) {
+                appDelegate.clearAllRules()
+            }
+        } message: {
+            Text(L10n.current.clearAllRulesMessage)
         }
     }
 }
@@ -1551,18 +1782,36 @@ struct MappingView: View {
     @StateObject private var appsManager = RunningAppsManager()
     @State private var showAddSheet = false
     @State private var editingMapping: KeyMappingRule?
+    @State private var fileError: String?
     @EnvironmentObject var appDelegate: AppDelegate
-    
+
+    private var mappingTitle: String {
+        guard let fileName = mappingManager.importedFileName else { return L10n.current.mappingTitle }
+        return "\(L10n.current.mappingTitle) for \(fileName)"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Text(L10n.current.mappingTitle)
+                Text(mappingTitle)
                     .font(.title)
                     .fontWeight(.bold)
-                
+                    .lineLimit(1)
+
                 Spacer()
-                
+
+                Button(action: importRules) {
+                    Label("Import...", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.bordered)
+
+                Button(action: exportRules) {
+                    Label("Export...", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.bordered)
+                    .disabled(mappingManager.loadError != nil)
+
                 Button(action: { showAddSheet = true }) {
                     HStack {
                         Image(systemName: "plus.circle.fill")
@@ -1570,14 +1819,28 @@ struct MappingView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(mappingManager.loadError != nil)
             }
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
-            
+
             Divider()
-            
+
             // Mappings Table
-            if mappingManager.mappings.isEmpty {
+            if let loadError = mappingManager.loadError {
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.largeTitle)
+                        .foregroundColor(.orange)
+                    Text("Saved rules couldn't be loaded")
+                        .font(.headline)
+                    Text("\(loadError) The saved data is unchanged. Import a valid rules file to replace it.")
+                        .multilineTextAlignment(.center)
+                    Spacer()
+                }
+                .padding()
+            } else if mappingManager.mappings.isEmpty {
                 VStack {
                     Spacer()
                     Image(systemName: "arrow.left.arrow.right.square")
@@ -1607,8 +1870,8 @@ struct MappingView: View {
         }
         .sheet(item: $editingMapping) { mapping in
             AddMappingSheet(
-                manager: mappingManager, 
-                appsManager: appsManager, 
+                manager: mappingManager,
+                appsManager: appsManager,
                 isPresented: Binding(
                     get: { editingMapping != nil },
                     set: { if !$0 { editingMapping = nil } }
@@ -1619,6 +1882,47 @@ struct MappingView: View {
         }
         .onAppear {
             appsManager.fetchRunningApps()
+        }
+        .alert("Rules file error", isPresented: Binding(
+            get: { fileError != nil },
+            set: { if !$0 { fileError = nil } }
+        )) {
+            Button("OK") { fileError = nil }
+        } message: {
+            Text(fileError ?? "")
+        }
+    }
+
+    private func exportRules() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "BC64Keys Rules.json"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                let data = try mappingManager.exportData()
+                try data.write(to: url, options: .atomic)
+            } catch {
+                fileError = error.localizedDescription
+            }
+        }
+    }
+
+    private func importRules() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json, .folder]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            let access = url.startAccessingSecurityScopedResource()
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let data = try Data(contentsOf: url)
+                try mappingManager.importData(data, from: url)
+            } catch {
+                fileError = error.localizedDescription
+            }
         }
     }
 }
@@ -1732,8 +2036,7 @@ struct MappingRow: View {
         // For navigation type, find action by keyCode and modifiers (language-independent)
         if mapping.type == .navigation {
             if let action = NavigationAction.all.first(where: { 
-                $0.key == mapping.targetKeyCode && 
-                $0.modifiers == mapping.targetModifiers 
+                $0.matches(mapping)
             }) {
                 return action.localizedName
             }
@@ -1744,6 +2047,55 @@ struct MappingRow: View {
 }
 
 // MARK: - Add Mapping Sheet
+private struct AppFilterPicker: NSViewRepresentable {
+    @Binding var selection: AppFilterMode
+    var width: CGFloat
+
+    private static let modes: [AppFilterMode] = [.all, .exclude, .include]
+    private var labels: [String] {
+        [L10n.current.filterAllApps, L10n.current.filterExclude, L10n.current.filterInclude]
+    }
+
+    func makeNSView(context: Context) -> NSSegmentedControl {
+        let control = NSSegmentedControl(labels: labels, trackingMode: .selectOne,
+                                         target: context.coordinator, action: #selector(Coordinator.selectFilter(_:)))
+        control.segmentDistribution = .fillProportionally
+        control.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        control.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return control
+    }
+
+    func updateNSView(_ control: NSSegmentedControl, context: Context) {
+        context.coordinator.selection = $selection
+        for (index, label) in labels.enumerated() {
+            control.setLabel(label, forSegment: index)
+        }
+        control.selectedSegment = Self.modes.firstIndex(of: selection) ?? 0
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSSegmentedControl, context: Context) -> CGSize? {
+        // Keep the native control's width stable when the form or window focus changes.
+        CGSize(width: width, height: nsView.intrinsicContentSize.height)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(selection: $selection)
+    }
+
+    final class Coordinator: NSObject {
+        var selection: Binding<AppFilterMode>
+
+        init(selection: Binding<AppFilterMode>) {
+            self.selection = selection
+        }
+
+        @objc func selectFilter(_ control: NSSegmentedControl) {
+            guard AppFilterPicker.modes.indices.contains(control.selectedSegment) else { return }
+            selection.wrappedValue = AppFilterPicker.modes[control.selectedSegment]
+        }
+    }
+}
+
 struct AddMappingSheet: View {
     @ObservedObject var manager: KeyMappingManager
     @ObservedObject var appsManager: RunningAppsManager
@@ -1773,6 +2125,26 @@ struct AddMappingSheet: View {
     @State private var appFilterMode: AppFilterMode = .all
     @State private var selectedAppBundleIDs: Set<String> = []
     
+    private enum Layout {
+        static let formWidth: CGFloat = 500
+        static let keyboardWidth: CGFloat = 480
+        static let dividerWidth: CGFloat = 1
+        static let sheetHeight: CGFloat = 520
+        static let formPadding: CGFloat = 16
+        static let sectionPadding: CGFloat = 12
+        static let columnSpacing: CGFloat = 16
+        static let arrowWidth: CGFloat = 24
+        static let keyFieldHeight: CGFloat = 60
+        static let controlRowHeight: CGFloat = 24
+        static let contentWidth = formWidth - 2 * formPadding
+        static let sectionContentWidth = contentWidth - 2 * sectionPadding
+        static let keyColumnWidth = (sectionContentWidth - arrowWidth - 2 * columnSpacing) / 2
+    }
+
+    private var sheetWidth: CGFloat {
+        Layout.formWidth + (showVisualKeyboard ? Layout.dividerWidth + Layout.keyboardWidth : 0)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -1808,18 +2180,22 @@ struct AddMappingSheet: View {
                                     .tag(MappingType.navigation)
                             }
                             .pickerStyle(.segmented)
+                            .frame(width: Layout.contentWidth)
                             .disabled(editingMapping != nil)
                         }
                         
-                        // Key Mapping Area
-                        HStack(spacing: 16) {
-                            // FROM Key
-                            VStack(spacing: 8) {
+                        // Shared rows keep labels, key fields, and controls aligned across rule types.
+                        Grid(horizontalSpacing: Layout.columnSpacing, verticalSpacing: 8) {
+                            GridRow {
                                 Text(L10n.current.source)
-                                    .font(.caption)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.secondary)
-                                
+                                Color.clear.frame(width: Layout.arrowWidth, height: 0)
+                                Text(L10n.current.target)
+                            }
+                            .font(.caption)
+                            .fontWeight(.bold)
+                            .foregroundColor(.secondary)
+
+                            GridRow {
                                 ZStack {
                                     RoundedRectangle(cornerRadius: 10)
                                         .fill(isCapturingFrom ? Color.red.opacity(0.1) : Color.blue.opacity(0.1))
@@ -1827,7 +2203,7 @@ struct AddMappingSheet: View {
                                             RoundedRectangle(cornerRadius: 10)
                                                 .strokeBorder(isCapturingFrom ? Color.red : Color.blue, lineWidth: 2)
                                         )
-                                    
+
                                     VStack(spacing: 4) {
                                         if fromKey.isEmpty {
                                             Image(systemName: "keyboard")
@@ -1844,157 +2220,153 @@ struct AddMappingSheet: View {
                                     }
                                     .padding(8)
                                 }
-                                .frame(height: 60)
+                                .frame(width: Layout.keyColumnWidth, height: Layout.keyFieldHeight)
                                 .onTapGesture {
                                     isCapturingFrom = true
                                     isCapturingTo = false
                                 }
-                                
-                                if !fromKey.isEmpty {
-                                    Button(action: { 
-                                        fromKey = ""
-                                        fromKeyCode = 0
-                                        fromModifiers = nil
-                                    }) {
-                                        Label(L10n.current.clear, systemImage: "xmark.circle")
-                                            .font(.caption2)
-                                    }
-                                    .buttonStyle(.borderless)
-                                    .foregroundColor(.red)
-                                }
-                            }
-                            .frame(maxWidth: .infinity)
-                            
-                            // Arrow
-                            Image(systemName: "arrow.right.circle.fill")
-                                .font(.system(size: 24))
-                                .foregroundColor(.green)
-                                .padding(.top, 20)
-                            
-                            // TO Key
-                            VStack(spacing: 8) {
-                                Text(L10n.current.target)
-                                    .font(.caption)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.secondary)
-                                
-                                if mappingType == .simpleKey {
-                                    ZStack {
-                                        RoundedRectangle(cornerRadius: 10)
-                                            .fill(isCapturingTo ? Color.red.opacity(0.1) : Color.green.opacity(0.1))
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 10)
-                                                    .strokeBorder(isCapturingTo ? Color.red : Color.green, lineWidth: 2)
-                                            )
-                                        
-                                        VStack(spacing: 4) {
-                                            if toKey.isEmpty {
-                                                Image(systemName: "keyboard")
-                                                    .font(.title2)
-                                                    .foregroundColor(.secondary)
-                                                Text(isCapturingTo ? L10n.current.pressKey : L10n.current.clickHere)
-                                                    .font(.caption2)
-                                                    .foregroundColor(.secondary)
-                                            } else {
-                                                Text(toKey)
-                                                    .font(.system(size: 16, weight: .bold, design: .rounded))
-                                                    .foregroundColor(.primary)
+
+                                Image(systemName: "arrow.right.circle.fill")
+                                    .font(.system(size: Layout.arrowWidth))
+                                    .foregroundColor(.green)
+                                    .frame(width: Layout.arrowWidth)
+
+                                Group {
+                                    if mappingType == .simpleKey {
+                                        ZStack {
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .fill(isCapturingTo ? Color.red.opacity(0.1) : Color.green.opacity(0.1))
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 10)
+                                                        .strokeBorder(isCapturingTo ? Color.red : Color.green, lineWidth: 2)
+                                                )
+
+                                            VStack(spacing: 4) {
+                                                if toKey.isEmpty {
+                                                    Image(systemName: "keyboard")
+                                                        .font(.title2)
+                                                        .foregroundColor(.secondary)
+                                                    Text(isCapturingTo ? L10n.current.pressKey : L10n.current.clickHere)
+                                                        .font(.caption2)
+                                                        .foregroundColor(.secondary)
+                                                } else {
+                                                    Text(toKey)
+                                                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                                                        .foregroundColor(.primary)
+                                                }
                                             }
+                                            .padding(8)
                                         }
-                                        .padding(8)
-                                    }
-                                    .frame(height: 60)
-                                    .onTapGesture {
-                                        isCapturingTo = true
-                                        isCapturingFrom = false
-                                    }
-                                    
-                                    HStack(spacing: 8) {
-                                        // Visual Keyboard Toggle Button
-                                        Button(action: { 
-                                            showVisualKeyboard.toggle()
-                                            isCapturingTo = false
+                                        .onTapGesture {
+                                            isCapturingTo = true
                                             isCapturingFrom = false
-                                        }) {
-                                            Image(systemName: showVisualKeyboard ? "keyboard.fill" : "keyboard")
-                                                .font(.caption)
                                         }
-                                        .buttonStyle(.bordered)
-                                        .tint(showVisualKeyboard ? .blue : .gray)
-                                        .help(L10n.current.showKeyboard)
-                                        
-                                        if !toKey.isEmpty {
-                                            Button(action: { 
-                                                toKey = ""
-                                                toKeyCode = 0
+                                    } else {
+                                        ZStack {
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .fill(Color.purple.opacity(0.1))
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 10)
+                                                        .strokeBorder(Color.purple, lineWidth: 2)
+                                                )
+
+                                            VStack(spacing: 4) {
+                                                if let action = selectedNavigationAction {
+                                                    Image(systemName: "checkmark.circle.fill")
+                                                        .font(.title2)
+                                                        .foregroundColor(.green)
+                                                    Text(action.name)
+                                                        .font(.system(size: 11, weight: .semibold))
+                                                        .multilineTextAlignment(.center)
+                                                        .lineLimit(2)
+                                                } else {
+                                                    Image(systemName: "list.bullet")
+                                                        .font(.title2)
+                                                        .foregroundColor(.secondary)
+                                                    Text(L10n.current.selectAction)
+                                                        .font(.caption2)
+                                                        .foregroundColor(.secondary)
+                                                }
+                                            }
+                                            .padding(8)
+                                        }
+                                    }
+                                }
+                                .frame(width: Layout.keyColumnWidth, height: Layout.keyFieldHeight)
+                            }
+
+                            GridRow {
+                                HStack {
+                                    if !fromKey.isEmpty {
+                                        Button(action: {
+                                            fromKey = ""
+                                            fromKeyCode = 0
+                                            fromModifiers = nil
+                                        }) {
+                                            Label(L10n.current.clear, systemImage: "xmark.circle")
+                                                .font(.caption2)
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .foregroundColor(.red)
+                                    }
+                                }
+                                .frame(width: Layout.keyColumnWidth, height: Layout.controlRowHeight)
+
+                                Color.clear.frame(width: Layout.arrowWidth, height: 0)
+
+                                Group {
+                                    if mappingType == .simpleKey {
+                                        HStack(spacing: 8) {
+                                            // Visual Keyboard Toggle Button
+                                            Button(action: {
+                                                showVisualKeyboard.toggle()
+                                                isCapturingTo = false
+                                                isCapturingFrom = false
                                             }) {
-                                                Image(systemName: "xmark.circle")
+                                                Image(systemName: showVisualKeyboard ? "keyboard.fill" : "keyboard")
                                                     .font(.caption)
                                             }
-                                            .buttonStyle(.borderless)
-                                            .foregroundColor(.red)
-                                        }
-                                    }
-                                } else {
-                                    // Navigation action picker
-                                    ZStack {
-                                        RoundedRectangle(cornerRadius: 10)
-                                            .fill(Color.purple.opacity(0.1))
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 10)
-                                                    .strokeBorder(Color.purple, lineWidth: 2)
-                                            )
-                                        
-                                        VStack(spacing: 4) {
-                                            if let action = selectedNavigationAction {
-                                                Image(systemName: "checkmark.circle.fill")
-                                                    .font(.title2)
-                                                    .foregroundColor(.green)
-                                                Text(action.name)
-                                                    .font(.system(size: 11, weight: .semibold))
-                                                    .multilineTextAlignment(.center)
-                                                    .lineLimit(2)
-                                            } else {
-                                                Image(systemName: "list.bullet")
-                                                    .font(.title2)
-                                                    .foregroundColor(.secondary)
-                                                Text(L10n.current.selectAction)
-                                                    .font(.caption2)
-                                                    .foregroundColor(.secondary)
+                                            .buttonStyle(.bordered)
+                                            .tint(showVisualKeyboard ? .blue : .gray)
+                                            .help(L10n.current.showKeyboard)
+
+                                            if !toKey.isEmpty {
+                                                Button(action: {
+                                                    toKey = ""
+                                                    toKeyCode = 0
+                                                }) {
+                                                    Image(systemName: "xmark.circle")
+                                                        .font(.caption)
+                                                }
+                                                .buttonStyle(.borderless)
+                                                .foregroundColor(.red)
                                             }
                                         }
-                                        .padding(8)
-                                    }
-                                    .frame(height: 60)
-                                    
-                                    Picker("", selection: $selectedNavigationAction) {
-                                        Text(L10n.current.select).tag(nil as NavigationAction?)
-                                        ForEach(NavigationAction.all) { action in
-                                            Text(action.localizedName).tag(action as NavigationAction?)
+                                    } else {
+                                        Picker("", selection: $selectedNavigationAction) {
+                                            Text(L10n.current.select).tag(nil as NavigationAction?)
+                                            ForEach(NavigationAction.all) { action in
+                                                Text(action.localizedName).tag(action as NavigationAction?)
+                                            }
                                         }
+                                        .labelsHidden()
                                     }
-                                    .labelsHidden()
                                 }
+                                .frame(width: Layout.keyColumnWidth, height: Layout.controlRowHeight)
                             }
-                            .frame(maxWidth: .infinity)
                         }
-                        .padding(12)
+                        .padding(Layout.sectionPadding)
                         .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
                         .cornerRadius(10)
-                        
+
                         // Per-App Filter Section
                         VStack(alignment: .leading, spacing: 8) {
                             Text(L10n.current.appFilter)
                                 .font(.headline)
                                 .foregroundColor(.secondary)
                             
-                            Picker("", selection: $appFilterMode) {
-                                Label(L10n.current.filterAllApps, systemImage: "square.stack.3d.up").tag(AppFilterMode.all)
-                                Label(L10n.current.filterExclude, systemImage: "minus.circle").tag(AppFilterMode.exclude)
-                                Label(L10n.current.filterInclude, systemImage: "checkmark.circle").tag(AppFilterMode.include)
-                            }
-                            .pickerStyle(.segmented)
-                            
+                            AppFilterPicker(selection: $appFilterMode, width: Layout.sectionContentWidth)
+
                             if appFilterMode != .all {
                                 VStack(alignment: .leading, spacing: 6) {
                                     HStack {
@@ -2051,18 +2423,20 @@ struct AddMappingSheet: View {
                                 .cornerRadius(8)
                             }
                         }
-                        .padding(12)
+                        .padding(Layout.sectionPadding)
                         .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
                         .cornerRadius(10)
                     }
-                    .padding(16)
+                    .frame(width: Layout.contentWidth)
+                    .padding(Layout.formPadding)
                 }
-                .frame(minWidth: 400)
+                .frame(width: Layout.formWidth)
                 
-                // RIGHT SIDE: Visual Keyboard (only for simpleKey mode when toggled)
-                if showVisualKeyboard && mappingType == .simpleKey {
+                // Keep the side panel open across rule types so switching does not resize the sheet.
+                if showVisualKeyboard {
                     Divider()
-                    
+                        .frame(width: Layout.dividerWidth)
+
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text(L10n.current.clickToSelect)
@@ -2075,22 +2449,24 @@ struct AddMappingSheet: View {
                             }
                             .buttonStyle(.plain)
                         }
-                        
+
                         VisualKeyboardView(
                             selectedKeyCode: $toKeyCode,
                             selectedKeyName: $toKey,
                             selectedCharacter: $toCharacter,
                             onKeySelected: nil
                         )
-                        
+                        .disabled(mappingType != .simpleKey)
+                        .opacity(mappingType == .simpleKey ? 1 : 0.5)
+
                         Spacer()
                     }
                     .padding(12)
-                    .frame(width: 480)
+                    .frame(width: Layout.keyboardWidth)
                     .background(Color(NSColor.windowBackgroundColor))
                 }
             }
-            
+
             Divider()
             
             if let validationMessage {
@@ -2121,7 +2497,7 @@ struct AddMappingSheet: View {
             }
             .padding(16)
         }
-        .frame(width: showVisualKeyboard && mappingType == .simpleKey ? 920 : 500, height: 520)
+        .frame(width: sheetWidth, height: Layout.sheetHeight)
         .animation(.easeInOut(duration: 0.2), value: showVisualKeyboard)
         .onAppear {
             // Suspend remapping to capture original keys, not remapped ones
@@ -2146,8 +2522,7 @@ struct AddMappingSheet: View {
                 
                 if mapping.type == .navigation {
                     selectedNavigationAction = NavigationAction.all.first {
-                        $0.key == mapping.targetKeyCode &&
-                        $0.modifiers == mapping.targetModifiers
+                        $0.matches(mapping)
                     }
                 }
                 
@@ -2216,7 +2591,8 @@ struct AddMappingSheet: View {
                 targetKeyName: action.name,
                 targetModifiers: action.modifiers,
                 appFilterMode: appFilterMode,
-                filteredApps: Array(selectedAppBundleIDs)
+                filteredApps: Array(selectedAppBundleIDs),
+                systemAction: action.systemAction
             )
             if let editingMapping = editingMapping {
                 manager.updateMapping(editingMapping, with: mapping)
@@ -2228,33 +2604,35 @@ struct AddMappingSheet: View {
     }
     
     private func startKeyCapture() {
-        // Captures the next keyDown event when the user clicks “Source” or “Target”.
-        // Returning nil consumes the event so it does not type into any focused control.
         if let monitor = keyCaptureMonitor {
             NSEvent.removeMonitor(monitor)
             keyCaptureMonitor = nil
         }
-
-        keyCaptureMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if self.isCapturingFrom {
-                let baseKey = self.getKeyName(keyCode: event.keyCode, char: event.charactersIgnoringModifiers ?? "")
-                let mods = self.getModifierString(event.modifierFlags)
-                self.fromKey = mods.isEmpty ? baseKey : "\(mods)\(baseKey)"
-                self.fromKeyCode = event.keyCode
-                self.fromModifiers = self.getCGEventFlags(event.modifierFlags)
-                self.isCapturingFrom = false
-                return nil
-            } else if self.isCapturingTo {
-                self.toKey = self.getKeyName(keyCode: event.keyCode, char: event.charactersIgnoringModifiers ?? "")
-                self.toKeyCode = event.keyCode
-                self.toCharacter = nil  // Physical key press - don't use Unicode character
-                self.isCapturingTo = false
+        keyCaptureMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
+            guard self.isCapturingFrom || self.isCapturingTo else { return event }
+            let type: CGEventType = event.type == .flagsChanged ? .flagsChanged : .keyDown
+            guard let selection = KeyCaptureState().capture(type: type, keyCode: event.keyCode,
+                                                               flags: CGEventFlags(rawValue: UInt64(event.modifierFlags.rawValue))) else {
                 return nil
             }
-            return event
+            let char = event.type == .flagsChanged ? "" : (event.charactersIgnoringModifiers ?? "")
+            if self.isCapturingFrom {
+                let baseKey = self.getKeyName(keyCode: selection.keyCode, char: char)
+                let mods = self.getModifierString(NSEvent.ModifierFlags(rawValue: UInt(selection.flags.rawValue)))
+                self.fromKey = mods.isEmpty ? baseKey : "\(mods)\(baseKey)"
+                self.fromKeyCode = selection.keyCode
+                self.fromModifiers = selection.flags.isEmpty ? nil : selection.flags
+                self.isCapturingFrom = false
+            } else {
+                self.toKey = self.getKeyName(keyCode: selection.keyCode, char: char)
+                self.toKeyCode = selection.keyCode
+                self.toCharacter = nil
+                self.isCapturingTo = false
+            }
+            return nil
         }
     }
-    
+
     private func getKeyName(keyCode: UInt16, char: String) -> String {
         if let name = kSpecialKeys[keyCode] { return name }
         return char.isEmpty ? "(\(keyCode))" : char.uppercased()
@@ -2333,6 +2711,214 @@ struct KeyEventRow: View {
     }
 }
 
+// MARK: - Held mapping state
+// A press owns its mapping until release, independent of later rule/app changes.
+struct RemappingState {
+    static let eventTag: Int64 = 0x424336344B657973
+    private var rulesEnabled = true
+    private var activeMappings: [UInt16: KeyMappingRule] = [:]
+    private var pressedKeys: Set<UInt16> = []
+    private var capsLockPressed = false
+    private var capsLockMapped = false
+    private var lastFlags: CGEventFlags = []
+
+    mutating func synchronize(flags: CGEventFlags, heldKeys: Set<UInt16>) {
+        lastFlags = flags
+        pressedKeys = heldKeys
+        capsLockPressed = flags.contains(.maskAlphaShift)
+        capsLockMapped = false
+    }
+
+    mutating func setRulesEnabled(_ enabled: Bool, physicalFlags: CGEventFlags? = nil) -> [CGEvent] {
+        guard rulesEnabled != enabled else { return [] }
+        rulesEnabled = enabled
+        // Keep the toggle's held press and key-up paired while releasing other mappings.
+        // Retain pressedKeys so held keys don't start remapping midway through a press.
+        return enabled ? [] : releaseMappings(physicalFlags: physicalFlags, keepingToggle: true)
+    }
+
+    func effectiveFlags(_ flags: CGEventFlags) -> CGEventFlags {
+        var result = flags
+        for keyCode in activeMappings.keys {
+            if let modifier = PhysicalModifier.key(keyCode) {
+                result = modifier.removing(from: result)
+            }
+        }
+        for mapping in activeMappings.values where mapping.systemAction == nil && !isDiscard(mapping) && (mapping.targetCharacter?.isEmpty ?? true) {
+            if let modifier = PhysicalModifier.key(mapping.targetKeyCode) {
+                result = modifier.adding(to: result)
+            }
+        }
+        return result
+    }
+
+    private func isDiscard(_ mapping: KeyMappingRule) -> Bool {
+        mapping.systemAction == nil && mapping.type == .navigation && mapping.targetKeyCode == 0 &&
+            mapping.targetModifiers == nil && (mapping.targetCharacter?.isEmpty ?? true)
+    }
+
+    private func findMatchingMapping(keyCode: UInt16, eventFlags: CGEventFlags,
+                                     mappings: [KeyMappingRule], bundleID: String) -> KeyMappingRule? {
+        mappings.first { mapping in
+            guard mapping.isEnabled && mapping.sourceKeyCode == keyCode &&
+                  (rulesEnabled || mapping.systemAction == .toggleRules) else { return false }
+            switch mapping.appFilterMode {
+            case .all: break
+            case .exclude:
+                if mapping.filteredApps.contains(bundleID) { return false }
+            case .include:
+                if !mapping.filteredApps.contains(bundleID) { return false }
+            }
+            if let required = mapping.sourceModifiers {
+                return eventFlags.intersection(PhysicalModifier.userFlags) == required.intersection(PhysicalModifier.userFlags)
+            }
+            // A standalone physical modifier remains usable while other modifiers are held.
+            return PhysicalModifier.key(keyCode) != nil || eventFlags.intersection(PhysicalModifier.userFlags).isEmpty
+        }
+    }
+
+    private func output(mapping: KeyMappingRule, isKeyDown: Bool, flags: CGEventFlags,
+                        originalEvent: CGEvent? = nil) -> CGEvent? {
+        guard mapping.systemAction == nil && !isDiscard(mapping) else { return nil }
+        if let character = mapping.targetCharacter, !character.isEmpty {
+            guard isKeyDown, let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else { return nil }
+            var unicode = Array(character.utf16)
+            event.keyboardSetUnicodeString(stringLength: unicode.count, unicodeString: &unicode)
+            event.flags = mapping.sourceModifiers == nil ? flags : []
+            event.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
+            return event
+        }
+        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: mapping.targetKeyCode, keyDown: isKeyDown) else { return nil }
+        if PhysicalModifier.key(mapping.targetKeyCode) != nil {
+            event.type = .flagsChanged
+            event.flags = flags
+        } else {
+            event.type = isKeyDown ? .keyDown : .keyUp
+            event.flags = mapping.targetModifiers ?? (mapping.sourceModifiers == nil ? flags : [])
+        }
+        if let originalEvent = originalEvent {
+            event.setIntegerValueField(.keyboardEventAutorepeat, value: originalEvent.getIntegerValueField(.keyboardEventAutorepeat))
+        }
+        event.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
+        return event
+    }
+
+    mutating func process(type: CGEventType, event: CGEvent, mappings: [KeyMappingRule], bundleID: String, debugLoggingEnabled: Bool = false, performSystemAction: (SystemAction) -> Void = { _ in }) -> [CGEvent] {
+        guard event.getIntegerValueField(.eventSourceUserData) != Self.eventTag else { return [event] }
+        let flags = event.flags
+        lastFlags = flags
+        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        let modifier = PhysicalModifier.key(keyCode)
+
+        if type == .flagsChanged && keyCode == 57 {
+            let active = flags.contains(.maskAlphaShift)
+            defer { capsLockPressed = active }
+            // Caps Lock changes state on every press; either transition can toggle rules.
+            if active != capsLockPressed,
+               let mapping = findMatchingMapping(keyCode: 57, eventFlags: effectiveFlags(flags), mappings: mappings, bundleID: bundleID),
+               mapping.systemAction == .toggleRules {
+                capsLockMapped = active
+                performSystemAction(.toggleRules)
+                return []
+            }
+            if active && !capsLockPressed {
+                let matchingFlags = effectiveFlags(flags)
+                if let mapping = findMatchingMapping(keyCode: 57, eventFlags: matchingFlags, mappings: mappings, bundleID: bundleID) {
+                    capsLockMapped = true
+                    activeMappings[57] = mapping
+                    if let action = mapping.systemAction { performSystemAction(action) }
+                    let down = output(mapping: mapping, isKeyDown: true, flags: effectiveFlags(flags))
+                    activeMappings.removeValue(forKey: 57)
+                    let up = output(mapping: mapping, isKeyDown: false, flags: effectiveFlags(flags))
+                    return [down, up].compactMap { $0 }
+                }
+            } else if !active && capsLockPressed && capsLockMapped {
+                capsLockMapped = false
+                return []
+            }
+            event.flags = effectiveFlags(flags)
+            return [event]
+        }
+
+        guard type == .keyDown || type == .keyUp || (type == .flagsChanged && modifier != nil) else {
+            // Mouse/scroll flags must agree with keyboard flags while a modifier is remapped.
+            event.flags = effectiveFlags(flags)
+            return [event]
+        }
+        let isKeyDown = type == .flagsChanged ? modifier!.isDown(in: flags) : type == .keyDown
+        let previousFlags = effectiveFlags(flags)
+        if isKeyDown {
+            let firstPress = pressedKeys.insert(keyCode).inserted
+            if firstPress {
+                let matchingFlags = modifier?.removing(from: previousFlags) ?? previousFlags
+                if let mapping = findMatchingMapping(keyCode: keyCode, eventFlags: matchingFlags, mappings: mappings, bundleID: bundleID) {
+                    activeMappings[keyCode] = mapping
+                    if debugLoggingEnabled {
+                        print("🔀 Remap \(keyCode) → \(mapping.targetKeyCode) [\(bundleID)]")
+                    }
+                }
+            }
+            if let mapping = activeMappings[keyCode] {
+                if let action = mapping.systemAction {
+                    if firstPress { performSystemAction(action) }
+                    return []
+                }
+                if let target = PhysicalModifier.key(mapping.targetKeyCode), (mapping.targetCharacter?.isEmpty ?? true) {
+                    // Don't repeat modifier presses or release a target still held by another source.
+                    let beforePress = modifier?.removing(from: previousFlags) ?? previousFlags
+                    if !firstPress || target.isDown(in: beforePress) { return [] }
+                }
+                return [output(mapping: mapping, isKeyDown: true, flags: effectiveFlags(flags), originalEvent: event)].compactMap { $0 }
+            }
+        } else {
+            pressedKeys.remove(keyCode)
+            if let mapping = activeMappings.removeValue(forKey: keyCode) {
+                let outputFlags = effectiveFlags(flags)
+                if let target = PhysicalModifier.key(mapping.targetKeyCode), (mapping.targetCharacter?.isEmpty ?? true),
+                   target.isDown(in: outputFlags) {
+                    return []
+                }
+                return [output(mapping: mapping, isKeyDown: false, flags: outputFlags, originalEvent: event)].compactMap { $0 }
+            }
+        }
+        event.flags = effectiveFlags(flags)
+        return [event]
+    }
+
+    // Balance emitted presses on stop, capture suspension, termination, or a disabled tap.
+    mutating func releaseAll(physicalFlags: CGEventFlags? = nil) -> [CGEvent] {
+        let events = releaseMappings(physicalFlags: physicalFlags)
+        pressedKeys.removeAll()
+        capsLockMapped = false
+        return events
+    }
+
+    private mutating func releaseMappings(physicalFlags: CGEventFlags?, keepingToggle: Bool = false) -> [CGEvent] {
+        let flags = physicalFlags ?? lastFlags
+        let keys = activeMappings.keys.filter { !keepingToggle || activeMappings[$0]?.systemAction != .toggleRules }.sorted()
+        let suppressed = keys.compactMap { PhysicalModifier.key($0) }
+        var events: [CGEvent] = []
+        for keyCode in keys {
+            guard let mapping = activeMappings.removeValue(forKey: keyCode) else { continue }
+            let outputFlags = effectiveFlags(flags)
+            if let target = PhysicalModifier.key(mapping.targetKeyCode), target.isDown(in: outputFlags) { continue }
+            if let event = output(mapping: mapping, isKeyDown: false, flags: outputFlags) {
+                events.append(event)
+            }
+        }
+        // Restore any physical modifiers still held when normal pass-through resumes.
+        for modifier in suppressed where modifier.isDown(in: flags) {
+            if let event = CGEvent(keyboardEventSource: nil, virtualKey: modifier.keyCode, keyDown: true) {
+                event.type = .flagsChanged
+                event.flags = effectiveFlags(flags)
+                event.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
+                events.append(event)
+            }
+        }
+        return events
+    }
+}
+
 // MARK: - Key Remapper using CGEventTap
 class KeyRemapper {
     private var eventTap: CFMachPort?
@@ -2340,8 +2926,8 @@ class KeyRemapper {
     weak var mappingManager: KeyMappingManager?
     var debugLoggingEnabled: Bool = false
     
-    // Track Caps Lock state to detect press/release
-    private var capsLockPressed: Bool = false
+    private var state = RemappingState()
+    private let onToggleRules: () -> Void
     
     // Cached frontmost bundle ID. Tap + workspace observer both run on the main
     // run loop, so a plain var is enough — DispatchQueue.sync per keystroke caused lag.
@@ -2353,8 +2939,22 @@ class KeyRemapper {
         return eventTap != nil
     }
     
-    init(mappingManager: KeyMappingManager) {
+    init(mappingManager: KeyMappingManager, onToggleRules: @escaping () -> Void = {}) {
         self.mappingManager = mappingManager
+        self.onToggleRules = onToggleRules
+    }
+
+    func setRulesEnabled(_ enabled: Bool) {
+        for event in state.setRulesEnabled(enabled, physicalFlags: CGEventSource.flagsState(.hidSystemState)) {
+            event.post(tap: .cgSessionEventTap)
+        }
+    }
+
+    private func performSystemAction(_ action: SystemAction) {
+        guard action == .toggleRules else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.onToggleRules()
+        }
     }
     
     func startRemapping() {
@@ -2365,6 +2965,7 @@ class KeyRemapper {
         
         // Idempotent: drop any previous tap/observer before creating a new one
         stopRemapping()
+        synchronizeState()
         
         // Initialize cached bundle ID
         cachedBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
@@ -2380,11 +2981,22 @@ class KeyRemapper {
             }
         }
         
-        // Create event tap for keyboard events
-        let eventMask = (1 << CGEventType.keyDown.rawValue) | 
+        // Include pointer events so suppressed/held modifiers also apply to clicks and scrolling.
+        let eventMask = (1 << CGEventType.keyDown.rawValue) |
                         (1 << CGEventType.keyUp.rawValue) |
-                        (1 << CGEventType.flagsChanged.rawValue)
-        
+                        (1 << CGEventType.flagsChanged.rawValue) |
+                        (1 << CGEventType.leftMouseDown.rawValue) |
+                        (1 << CGEventType.leftMouseUp.rawValue) |
+                        (1 << CGEventType.rightMouseDown.rawValue) |
+                        (1 << CGEventType.rightMouseUp.rawValue) |
+                        (1 << CGEventType.otherMouseDown.rawValue) |
+                        (1 << CGEventType.otherMouseUp.rawValue) |
+                        (1 << CGEventType.mouseMoved.rawValue) |
+                        (1 << CGEventType.leftMouseDragged.rawValue) |
+                        (1 << CGEventType.rightMouseDragged.rawValue) |
+                        (1 << CGEventType.otherMouseDragged.rawValue) |
+                        (1 << CGEventType.scrollWheel.rawValue)
+
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -2415,6 +3027,9 @@ class KeyRemapper {
     }
     
     func stopRemapping() {
+        for event in state.releaseAll(physicalFlags: CGEventSource.flagsState(.hidSystemState)) {
+            event.post(tap: .cgSessionEventTap)
+        }
         // Remove workspace observer
         if let observer = workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
@@ -2432,169 +3047,34 @@ class KeyRemapper {
         }
     }
     
+    private func synchronizeState() {
+        let flags = CGEventSource.flagsState(.hidSystemState)
+        let heldKeys = Set((0...127).compactMap { value -> UInt16? in
+            let key = UInt16(value)
+            return CGEventSource.keyState(.hidSystemState, key: key) ? key : nil
+        })
+        state.synchronize(flags: flags, heldKeys: heldKeys)
+    }
+
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        // Re-enable tap if it was disabled
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            for released in state.releaseAll(physicalFlags: CGEventSource.flagsState(.hidSystemState)) {
+                released.tapPostEvent(proxy)
+            }
+            synchronizeState()
             if let eventTap = eventTap {
                 CGEvent.tapEnable(tap: eventTap, enable: true)
             }
             return Unmanaged.passUnretained(event)
         }
-        
-        // Process key events and flags changed (for Caps Lock and modifiers)
-        guard type == .keyDown || type == .keyUp || type == .flagsChanged else {
-            return Unmanaged.passUnretained(event)
+        let events = state.process(type: type, event: event, mappings: mappingManager?.mappings ?? [], bundleID: cachedBundleID, debugLoggingEnabled: debugLoggingEnabled, performSystemAction: performSystemAction)
+        guard let last = events.last else { return nil }
+        for extra in events.dropLast() {
+            extra.tapPostEvent(proxy)
         }
-        
-        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-        let eventFlags = event.flags
-        
-        // Special handling for Caps Lock via flagsChanged
-        // Note: flagsChanged is triggered when ANY modifier key state changes (Shift, Cmd, Opt, Ctrl, Caps Lock),
-        // but we only handle Caps Lock here by checking the .maskAlphaShift flag.
-        // Other modifiers (Shift, Cmd, etc.) are handled via eventFlags matching in handleKeyMapping.
-        if type == .flagsChanged {
-            let capsLockActive = eventFlags.contains(.maskAlphaShift)
-            
-            if capsLockActive && !capsLockPressed {
-                capsLockPressed = true
-                if findMatchingMapping(keyCode: 57, eventFlags: eventFlags) != nil {
-                    if let down = handleKeyMapping(keyCode: 57, eventFlags: eventFlags, isKeyDown: true, originalEvent: nil)?.takeRetainedValue() {
-                        down.post(tap: .cghidEventTap)
-                    }
-                    if let up = handleKeyMapping(keyCode: 57, eventFlags: eventFlags, isKeyDown: false, originalEvent: nil)?.takeRetainedValue() {
-                        up.post(tap: .cghidEventTap)
-                    }
-                    return nil
-                }
-                return Unmanaged.passUnretained(event)
-            } else if !capsLockActive && capsLockPressed {
-                capsLockPressed = false
-                if findMatchingMapping(keyCode: 57, eventFlags: eventFlags) != nil {
-                    return nil
-                }
-                return Unmanaged.passUnretained(event)
-            }
-            
-            return Unmanaged.passUnretained(event)
-        }
-        
-        // Handle normal key events
-        if type == .keyDown || type == .keyUp {
-            return handleKeyMapping(keyCode: keyCode, eventFlags: eventFlags, isKeyDown: type == .keyDown, originalEvent: event)
-        }
-        
-        return Unmanaged.passUnretained(event)
+        return last === event ? Unmanaged.passUnretained(event) : Unmanaged.passRetained(last)
     }
-    
-    private func findMatchingMapping(keyCode: UInt16, eventFlags: CGEventFlags) -> KeyMappingRule? {
-        guard let manager = mappingManager else { return nil }
-        let activeBundleID = cachedBundleID
-        
-        // Iterate in place — avoid allocating a filtered copy on every keystroke
-        for mapping in manager.mappings {
-            guard mapping.isEnabled, keyCode == mapping.sourceKeyCode else { continue }
-            
-            let shouldApply: Bool
-            switch mapping.appFilterMode {
-            case .all:
-                shouldApply = true
-            case .exclude:
-                shouldApply = !mapping.filteredApps.contains(activeBundleID)
-            case .include:
-                shouldApply = mapping.filteredApps.contains(activeBundleID)
-            }
-            if !shouldApply { continue }
-            
-            if let requiredMods = mapping.sourceModifiers {
-                let shiftPressed = eventFlags.contains(.maskShift)
-                let cmdPressed = eventFlags.contains(.maskCommand)
-                let optPressed = eventFlags.contains(.maskAlternate)
-                let ctrlPressed = eventFlags.contains(.maskControl)
-                
-                let reqShift = requiredMods.contains(.maskShift)
-                let reqCmd = requiredMods.contains(.maskCommand)
-                let reqOpt = requiredMods.contains(.maskAlternate)
-                let reqCtrl = requiredMods.contains(.maskControl)
-                
-                if shiftPressed != reqShift || cmdPressed != reqCmd || optPressed != reqOpt || ctrlPressed != reqCtrl {
-                    continue
-                }
-            } else {
-                let hasUserModifiers = eventFlags.contains(.maskShift) ||
-                                      eventFlags.contains(.maskCommand) ||
-                                      eventFlags.contains(.maskAlternate) ||
-                                      eventFlags.contains(.maskControl)
-                if hasUserModifiers { continue }
-            }
-            
-            return mapping
-        }
-        return nil
-    }
-    
-    private func passThrough(originalEvent: CGEvent?, keyCode: UInt16, eventFlags: CGEventFlags, isKeyDown: Bool) -> Unmanaged<CGEvent>? {
-        if let originalEvent = originalEvent {
-            return Unmanaged.passUnretained(originalEvent)
-        }
-        guard let passThroughEvent = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(keyCode), keyDown: isKeyDown) else {
-            return nil
-        }
-        passThroughEvent.flags = eventFlags
-        return Unmanaged.passRetained(passThroughEvent)
-    }
-    
-    private func handleKeyMapping(keyCode: UInt16, eventFlags: CGEventFlags, isKeyDown: Bool, originalEvent: CGEvent? = nil) -> Unmanaged<CGEvent>? {
-        guard let mapping = findMatchingMapping(keyCode: keyCode, eventFlags: eventFlags) else {
-            return passThrough(originalEvent: originalEvent, keyCode: keyCode, eventFlags: eventFlags, isKeyDown: isKeyDown)
-        }
-        
-        // Log only when a remap actually applies — never on the unmapped hot path
-        if debugLoggingEnabled {
-            print("🔀 Remap \(keyCode) → \(mapping.targetKeyCode) [\(cachedBundleID)]")
-        }
-        
-        if mapping.targetKeyCode == 0 && mapping.targetModifiers == nil &&
-            mapping.type == .navigation && (mapping.targetCharacter?.isEmpty ?? true) {
-            return nil
-        }
-        if let targetChar = mapping.targetCharacter, !targetChar.isEmpty {
-            if isKeyDown {
-                guard let newEvent = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
-                    return passThrough(originalEvent: originalEvent, keyCode: keyCode, eventFlags: eventFlags, isKeyDown: isKeyDown)
-                }
-                var unicodeString = Array(targetChar.utf16)
-                newEvent.keyboardSetUnicodeString(stringLength: unicodeString.count, unicodeString: &unicodeString)
-                if mapping.sourceModifiers != nil {
-                    newEvent.flags = []
-                } else {
-                    newEvent.flags = eventFlags
-                }
-                return Unmanaged.passRetained(newEvent)
-            } else {
-                return nil
-            }
-        }
-        
-        guard let newEvent = CGEvent(
-            keyboardEventSource: nil,
-            virtualKey: CGKeyCode(mapping.targetKeyCode),
-            keyDown: isKeyDown
-        ) else {
-            return passThrough(originalEvent: originalEvent, keyCode: keyCode, eventFlags: eventFlags, isKeyDown: isKeyDown)
-        }
-        
-        if let modifiers = mapping.targetModifiers {
-            newEvent.flags = modifiers
-        } else if mapping.sourceModifiers != nil {
-            newEvent.flags = []
-        } else {
-            newEvent.flags = eventFlags
-        }
-        
-        return Unmanaged.passRetained(newEvent)
-    }
-    
+
     deinit {
         // Ensure cleanup happens even if stopRemapping wasn't explicitly called
         stopRemapping()

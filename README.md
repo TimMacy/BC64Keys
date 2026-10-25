@@ -2,15 +2,28 @@
 
 **A simple, secure keyboard remapper for macOS** — the straightforward alternative to Karabiner Elements.
 
-**NEW in v1.9.2:** Monitor FlagsChanged crash fix + keyboard lag reductions.
+Fork of [badcode64/BC64Keys](https://github.com/badcode64/BC64Keys), based on v1.9.2.
 
-[![Download Latest](https://img.shields.io/github/v/release/badcode64/BC64Keys?label=Download&color=success)](https://github.com/badcode64/BC64Keys/releases/latest)
+[![Download Latest](https://img.shields.io/github/v/release/TimMacy/BC64Keys?label=Download&color=success)](https://github.com/TimMacy/BC64Keys/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
 [![Platform: macOS 13+](https://img.shields.io/badge/Platform-macOS%2013%2B-lightgrey.svg)]()
 [![Swift 5](https://img.shields.io/badge/Swift-5-orange.svg)]()
 [![Notarized](https://img.shields.io/badge/Apple-Notarized-success)]()
 
----
+## Updates in This Fork v1.10
+
+| Feature | Changes |
+|--------|---------|
+| Modifier keys | Capture and remap left/right Command, Option, Control, and Shift keys. Target key-down and key-up events follow the physical source press and release. Held modifier flags also apply consistently to other keys and pointer events. |
+| New Rule window | Stabilize the New Rule window, Source/Target fields, and application-filter controls. Keep the visual keyboard panel open across rule-type changes without unexpected resizing. |
+| JSON import/export | Import and export versioned, readable JSON rules files. Preserve saved data after failed loading or importing. Display the imported filename in the mappings title and remember it between launches. |
+| Rule controls | Pause or resume all mappings while preserving each rule's enabled state. Assign a key to toggle mappings, including while paused. Clear all saved rules through a confirmation dialog. |
+| Rule validation | Block overlapping assignments while allowing the same key in non-conflicting modifier or application scopes. Require an app selection for restricted application filters and show validation feedback before saving. |
+| MacBook actions and defaults | Add MacBook built-in display brightness actions for **0% and 45%**, center the pointer on the built-in display, and default new rules to **Key swap**. |
+
+Import validates the complete file before replacing the current rules. Invalid or unsupported files leave the existing rules and imported filename unchanged. Failed loading of saved data does not overwrite the original stored data.
+
+The global mapping toggle leaves individual rule settings intact. Clear All Rules deletes enabled and disabled rules after confirmation; other app settings are retained.
 
 ## Why BC64Keys?
 
@@ -33,7 +46,7 @@ I created BC64Keys because I just wanted to **remap a few keys** — not learn a
 
 ### 🔒 Security First
 
-**This app has access to your keystrokes** — that's how keyboard remapping works. 
+**This app has access to your keystrokes** — that's how keyboard remapping works.
 
 This is why BC64Keys is:
 - **100% Open Source** (GPL-3.0)
@@ -100,9 +113,9 @@ Coming from Windows? BC64Keys includes pre-configured actions for:
 
 ### Option 1: Download Release (Recommended) ⭐
 
-**Latest version: v1.9.2** ([Download](https://github.com/badcode64/BC64Keys/releases/latest))
+**Latest version: v1.10** ([Download](https://github.com/TimMacy/BC64Keys/releases/latest))
 
-1. Download **BC64Keys-v1.9.2.dmg** from [Releases](https://github.com/badcode64/BC64Keys/releases/latest)
+1. Download **BC64Keys-v1.10.dmg** from [Releases](https://github.com/TimMacy/BC64Keys/releases/latest)
 2. Open the DMG file
 3. Drag **BC64Keys.app** to your Applications folder
 4. Launch BC64Keys from Applications
@@ -113,7 +126,7 @@ Coming from Windows? BC64Keys includes pre-configured actions for:
 ### Option 2: Build from Source
 ```bash
 # Clone the repository
-git clone https://github.com/badcode64/BC64Keys.git
+git clone https://github.com/TimMacy/BC64Keys.git
 cd BC64Keys
 
 # Build and run
@@ -206,7 +219,7 @@ xattr -cr /Applications/BC64Keys.app
 codesign -vv --deep --strict /Applications/BC64Keys.app
 ```
 
-If signature is invalid, re-download from [official releases](https://github.com/badcode64/BC64Keys/releases/latest).
+If signature is invalid, re-download from [official releases](https://github.com/TimMacy/BC64Keys/releases/latest).
 
 ### Keys are stuck or behaving strangely
 
@@ -266,7 +279,7 @@ If your problem isn't listed here:
 1. Enable **Debug Logging** in Settings
 2. Reproduce the issue
 3. Check `~/Library/Logs/BC64Keys/bc64keys-status.log`
-4. [Open an issue](https://github.com/badcode64/BC64Keys/issues/new/choose) with:
+4. [Open an issue](https://github.com/TimMacy/BC64Keys/issues/new/choose) with:
    - macOS version
    - BC64Keys version
    - Steps to reproduce
