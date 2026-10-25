@@ -1,0 +1,58 @@
+name: Build App
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and publish macOS app
+    runs-on: macos-26
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Build universal macOS app
+        run: |
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          swiftc() {
+            xcrun swiftc -sdk "$SDKROOT" "$@"
+          }
+          export -f swiftc
+          bash ./build.sh
+          codesign --verify --deep --strict BC64Keys.app
+          architectures="$(lipo -archs BC64Keys.app/Contents/MacOS/BC64Keys)"
+          [[ " $architectures " == *" arm64 "* && " $architectures " == *" x86_64 "* ]]
+
+      - name: Package app
+        id: package
+        run: |
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' BC64Keys.app/Contents/Info.plist)"
+          tag="v${version}-build.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          asset="BC64Keys-${tag}-macOS-universal.zip"
+          ditto -c -k --sequesterRsrc --keepParent BC64Keys.app "$asset"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ steps.package.outputs.version }}
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+          RELEASE_ASSET: ${{ steps.package.outputs.asset }}
+        run: |
+          gh release create "$RELEASE_TAG" "$RELEASE_ASSET" \
+            --target "$GITHUB_SHA" \
+            --title "BC64Keys $RELEASE_VERSION (build $GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT)" \
+            --generate-notes \
+            --latest
