@@ -12,7 +12,7 @@ Fork of [badcode64/BC64Keys](https://github.com/badcode64/BC64Keys), based on v1
 
 ## Updates in This Fork v1.10
 
-<p align="center"><img width="85%" alt="Key Mappings" src="https://github.com/user-attachments/assets/6bb25f6a-2a62-4937-9817-4aee27743d8a" /></p>
+<p align="center"><img width="90%" alt="Key Mappings" src="https://github.com/user-attachments/assets/6bb25f6a-2a62-4937-9817-4aee27743d8a" /></p>
 
 | Feature | Changes |
 |--------|---------|
