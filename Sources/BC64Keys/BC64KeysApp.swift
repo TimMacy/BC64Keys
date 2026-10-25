@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Carbon
 import ServiceManagement
+import Darwin
 
 // BC64Keys
 // -------
@@ -648,18 +649,110 @@ enum AppFilterMode: String, Codable {
     case include  // Apply only to these apps
 }
 
+enum SystemAction: Codable, Hashable, CaseIterable {
+    case builtInBrightnessOff
+    case builtInDisplayOn
+    case centerCursorOnBuiltInDisplay
+    case unknown(String)
+
+    static var allCases: [SystemAction] { [.builtInBrightnessOff, .builtInDisplayOn, .centerCursorOnBuiltInDisplay] }
+
+    init(from decoder: Decoder) throws {
+        let identifier = try decoder.singleValueContainer().decode(String.self)
+        switch identifier {
+        case "display.brightness.off": self = .builtInBrightnessOff
+        case "display.brightness.on": self = .builtInDisplayOn
+        case "display.cursor.center", "centerCursorOnBuiltInDisplay": self = .centerCursorOnBuiltInDisplay
+        default: self = .unknown(identifier)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .builtInBrightnessOff: try container.encode("display.brightness.off")
+        case .builtInDisplayOn: try container.encode("display.brightness.on")
+        case .centerCursorOnBuiltInDisplay: try container.encode("display.cursor.center")
+        case .unknown(let identifier): try container.encode(identifier)
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .builtInBrightnessOff: return "MacBook display brightness: 0%"
+        case .builtInDisplayOn: return "MacBook display brightness: 45%"
+        case .centerCursorOnBuiltInDisplay: return "Center cursor on MacBook display"
+        case .unknown(let identifier): return "Unsupported action: \(identifier)"
+        }
+    }
+}
+
+enum BuiltInDisplayActions {
+    // DisplayServices supports Apple Silicon's built-in backlight. Load this private
+    // API optionally so an OS change cannot prevent KeyChanger from launching.
+    private typealias SetBrightness = @convention(c) (UInt32, Float) -> Int32
+    private static let framework = dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_LAZY | RTLD_LOCAL)
+    private static let setBrightness: SetBrightness? = {
+        guard let framework, let symbol = dlsym(framework, "DisplayServicesSetBrightness") else { return nil }
+        return unsafeBitCast(symbol, to: SetBrightness.self)
+    }()
+
+    static func displayID() -> CGDirectDisplayID? {
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return nil }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetOnlineDisplayList(count, &displays, &count) == .success else { return nil }
+        return displays.prefix(Int(count)).first { CGDisplayIsBuiltin($0) != 0 && CGDisplayIsActive($0) != 0 }
+    }
+
+    static func perform(_ action: SystemAction) {
+        if case .unknown = action { return }
+        // Keep display work outside the event-tap callback.
+        DispatchQueue.main.async {
+            guard let display = displayID() else {
+                NSSound.beep()
+                return
+            }
+            switch action {
+            case .builtInBrightnessOff, .builtInDisplayOn:
+                let brightness: Float = action == .builtInBrightnessOff ? 0 : 0.45
+                guard let setBrightness, setBrightness(display, brightness) == 0 else {
+                    NSSound.beep()
+                    return
+                }
+            case .centerCursorOnBuiltInDisplay:
+                // Quartz bounds use global coordinates, including negative origins
+                // and Retina scaling, regardless of which display is primary.
+                let bounds = CGDisplayBounds(display)
+                guard !bounds.isEmpty else { return }
+                CGAssociateMouseAndMouseCursorPosition(1)
+                if CGWarpMouseCursorPosition(CGPoint(x: bounds.midX, y: bounds.midY)) != .success {
+                    NSSound.beep()
+                }
+            case .unknown: break
+            }
+        }
+    }
+}
+
 struct NavigationAction: Identifiable, Codable, Hashable {
     let id = UUID()
     let name: String
     let key: UInt16
     let modifiers: CGEventFlags
-    
-    init(name: String, key: UInt16, modifiers: CGEventFlags) {
+    let systemAction: SystemAction?
+
+    init(name: String, key: UInt16, modifiers: CGEventFlags, systemAction: SystemAction? = nil) {
         self.name = name
         self.key = key
         self.modifiers = modifiers
+        self.systemAction = systemAction
     }
-    
+
+    func matches(_ mapping: KeyMappingRule) -> Bool {
+        systemAction == mapping.systemAction && key == mapping.targetKeyCode && modifiers == mapping.targetModifiers
+    }
+
     // Localized display name for UI
     var localizedName: String {
         // Extract action type from English name for localization
@@ -739,33 +832,35 @@ struct NavigationAction: Identifiable, Codable, Hashable {
         }
         return name // Fallback to English name
     }
-    
+
     // Hashable conformance
     static func == (lhs: NavigationAction, rhs: NavigationAction) -> Bool {
         lhs.id == rhs.id
     }
-    
+
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
-    
+
     enum CodingKeys: String, CodingKey {
-        case name, key, modifiers
+        case name, key, modifiers, systemAction
     }
-    
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decode(String.self, forKey: .name)
         key = try container.decode(UInt16.self, forKey: .key)
         let rawModifiers = try container.decode(UInt64.self, forKey: .modifiers)
         modifiers = CGEventFlags(rawValue: rawModifiers)
+        systemAction = try container.decodeIfPresent(SystemAction.self, forKey: .systemAction)
     }
-    
+
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(name, forKey: .name)
         try container.encode(key, forKey: .key)
         try container.encode(modifiers.rawValue, forKey: .modifiers)
+        try container.encodeIfPresent(systemAction, forKey: .systemAction)
     }
 }
 
@@ -773,6 +868,10 @@ struct NavigationAction: Identifiable, Codable, Hashable {
 extension NavigationAction {
     // Predefined navigation actions - optimized for Windows switchers
     static let all: [NavigationAction] = [
+        NavigationAction(name: SystemAction.builtInBrightnessOff.name, key: 0, modifiers: [], systemAction: .builtInBrightnessOff),
+        NavigationAction(name: SystemAction.builtInDisplayOn.name, key: 0, modifiers: [], systemAction: .builtInDisplayOn),
+        NavigationAction(name: SystemAction.centerCursorOnBuiltInDisplay.name, key: 0, modifiers: [], systemAction: .centerCursorOnBuiltInDisplay),
+
         // === SPECIAL (block key - targetKeyCode 0 with no modifiers means discard) ===
         NavigationAction(name: "🚫 Discard (block key)", key: 0, modifiers: []),
         
@@ -976,16 +1075,17 @@ struct KeyMappingRule: Identifiable, Codable {
     var targetKeyName: String
     var targetModifiers: CGEventFlags? // For navigation actions
     var targetCharacter: String? // Unicode character to send (from visual keyboard)
+    var systemAction: SystemAction?
     var isEnabled: Bool
-    
+
     // Per-app filtering
     var appFilterMode: AppFilterMode
     var filteredApps: [String] // Bundle IDs
-    
+
     init(id: UUID = UUID(), type: MappingType, sourceKeyCode: UInt16, sourceKeyName: String,
-         sourceModifiers: CGEventFlags? = nil, targetKeyCode: UInt16, targetKeyName: String, 
+         sourceModifiers: CGEventFlags? = nil, targetKeyCode: UInt16, targetKeyName: String,
          targetModifiers: CGEventFlags? = nil, targetCharacter: String? = nil, isEnabled: Bool = true,
-         appFilterMode: AppFilterMode = .all, filteredApps: [String] = []) {
+         appFilterMode: AppFilterMode = .all, filteredApps: [String] = [], systemAction: SystemAction? = nil) {
         self.id = id
         self.type = type
         self.sourceKeyCode = sourceKeyCode
@@ -995,15 +1095,16 @@ struct KeyMappingRule: Identifiable, Codable {
         self.targetKeyName = targetKeyName
         self.targetModifiers = targetModifiers
         self.targetCharacter = targetCharacter
+        self.systemAction = systemAction
         self.isEnabled = isEnabled
         self.appFilterMode = appFilterMode
         self.filteredApps = filteredApps
     }
-    
+
     enum CodingKeys: String, CodingKey {
-        case id, type, sourceKeyCode, sourceKeyName, sourceModifiers, targetKeyCode, targetKeyName, targetModifiers, targetCharacter, isEnabled, appFilterMode, filteredApps
+        case id, type, sourceKeyCode, sourceKeyName, sourceModifiers, targetKeyCode, targetKeyName, targetModifiers, targetCharacter, isEnabled, appFilterMode, filteredApps, systemAction
     }
-    
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
@@ -1023,13 +1124,14 @@ struct KeyMappingRule: Identifiable, Codable {
             targetModifiers = nil
         }
         targetCharacter = try container.decodeIfPresent(String.self, forKey: .targetCharacter)
+        systemAction = try container.decodeIfPresent(SystemAction.self, forKey: .systemAction)
         isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
-        
+
         // Per-app filtering (with defaults for backward compatibility)
         appFilterMode = try container.decodeIfPresent(AppFilterMode.self, forKey: .appFilterMode) ?? .all
         filteredApps = try container.decodeIfPresent([String].self, forKey: .filteredApps) ?? []
     }
-    
+
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
@@ -1041,6 +1143,7 @@ struct KeyMappingRule: Identifiable, Codable {
         try container.encode(targetKeyName, forKey: .targetKeyName)
         try container.encodeIfPresent(targetModifiers?.rawValue, forKey: .targetModifiers)
         try container.encodeIfPresent(targetCharacter, forKey: .targetCharacter)
+        try container.encodeIfPresent(systemAction, forKey: .systemAction)
         try container.encode(isEnabled, forKey: .isEnabled)
         try container.encode(appFilterMode, forKey: .appFilterMode)
         try container.encode(filteredApps, forKey: .filteredApps)
@@ -1703,8 +1806,7 @@ struct MappingRow: View {
         // For navigation type, find action by keyCode and modifiers (language-independent)
         if mapping.type == .navigation {
             if let action = NavigationAction.all.first(where: { 
-                $0.key == mapping.targetKeyCode && 
-                $0.modifiers == mapping.targetModifiers 
+                $0.matches(mapping)
             }) {
                 return action.localizedName
             }
@@ -1724,7 +1826,7 @@ struct AddMappingSheet: View {
     // Optional: if editing an existing mapping
     var editingMapping: KeyMappingRule?
     
-    @State private var mappingType: MappingType = .navigation
+    @State private var mappingType: MappingType = .simpleKey
     @State private var fromKey = ""
     @State private var fromKeyCode: UInt16 = 0
     @State private var fromModifiers: CGEventFlags?
@@ -2108,8 +2210,7 @@ struct AddMappingSheet: View {
                 
                 if mapping.type == .navigation {
                     selectedNavigationAction = NavigationAction.all.first {
-                        $0.key == mapping.targetKeyCode &&
-                        $0.modifiers == mapping.targetModifiers
+                        $0.matches(mapping)
                     }
                 }
                 
@@ -2171,7 +2272,8 @@ struct AddMappingSheet: View {
                 targetKeyName: action.name,
                 targetModifiers: action.modifiers,
                 appFilterMode: appFilterMode,
-                filteredApps: Array(selectedAppBundleIDs)
+                filteredApps: Array(selectedAppBundleIDs),
+                systemAction: action.systemAction
             )
             if let editingMapping = editingMapping {
                 manager.updateMapping(editingMapping, with: mapping)
@@ -2290,6 +2392,8 @@ struct KeyEventRow: View {
 
 // MARK: - Key Remapper using CGEventTap
 class KeyRemapper {
+    private static let eventTag: Int64 = 0x424336344B657973
+    private var pressedSystemActionKeys: Set<UInt16> = []
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     weak var mappingManager: KeyMappingManager?
@@ -2370,6 +2474,7 @@ class KeyRemapper {
     }
     
     func stopRemapping() {
+        pressedSystemActionKeys.removeAll()
         // Remove workspace observer
         if let observer = workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
@@ -2401,6 +2506,9 @@ class KeyRemapper {
             return Unmanaged.passUnretained(event)
         }
         
+        guard event.getIntegerValueField(.eventSourceUserData) != Self.eventTag else {
+            return Unmanaged.passUnretained(event)
+        }
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let eventFlags = event.flags
         
@@ -2500,10 +2608,27 @@ class KeyRemapper {
     }
     
     private func handleKeyMapping(keyCode: UInt16, eventFlags: CGEventFlags, isKeyDown: Bool, originalEvent: CGEvent? = nil) -> Unmanaged<CGEvent>? {
+        if !isKeyDown, pressedSystemActionKeys.remove(keyCode) != nil {
+            return nil
+        }
+        if isKeyDown, pressedSystemActionKeys.contains(keyCode) {
+            return nil
+        }
         guard let mapping = findMatchingMapping(keyCode: keyCode, eventFlags: eventFlags) else {
             return passThrough(originalEvent: originalEvent, keyCode: keyCode, eventFlags: eventFlags, isKeyDown: isKeyDown)
         }
         
+        if let action = mapping.systemAction {
+            guard isKeyDown else {
+                return passThrough(originalEvent: originalEvent, keyCode: keyCode, eventFlags: eventFlags, isKeyDown: isKeyDown)
+            }
+            pressedSystemActionKeys.insert(keyCode)
+            if originalEvent?.getIntegerValueField(.keyboardEventAutorepeat) != 1 {
+                BuiltInDisplayActions.perform(action)
+            }
+            return nil
+        }
+
         // Log only when a remap actually applies — never on the unmapped hot path
         if debugLoggingEnabled {
             print("🔀 Remap \(keyCode) → \(mapping.targetKeyCode) [\(cachedBundleID)]")
@@ -2525,6 +2650,7 @@ class KeyRemapper {
                 } else {
                     newEvent.flags = eventFlags
                 }
+                newEvent.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
                 return Unmanaged.passRetained(newEvent)
             } else {
                 return nil
@@ -2547,6 +2673,7 @@ class KeyRemapper {
             newEvent.flags = eventFlags
         }
         
+        newEvent.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
         return Unmanaged.passRetained(newEvent)
     }
     
