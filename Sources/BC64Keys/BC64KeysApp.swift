@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Carbon
 import ServiceManagement
+import Darwin
 import UniformTypeIdentifiers
 
 // BC64Keys
@@ -732,13 +733,21 @@ enum AppFilterMode: String, Codable {
     case include  // Apply only to these apps
 }
 
-enum SystemAction: Codable, Hashable {
+enum SystemAction: Codable, Hashable, CaseIterable {
+    case builtInBrightnessOff
+    case builtInDisplayOn
+    case centerCursorOnBuiltInDisplay
     case toggleRules
     case unknown(String)
+
+    static var allCases: [SystemAction] { [.builtInBrightnessOff, .builtInDisplayOn, .centerCursorOnBuiltInDisplay, .toggleRules] }
 
     init(from decoder: Decoder) throws {
         let identifier = try decoder.singleValueContainer().decode(String.self)
         switch identifier {
+        case "display.brightness.off": self = .builtInBrightnessOff
+        case "display.brightness.on": self = .builtInDisplayOn
+        case "display.cursor.center", "centerCursorOnBuiltInDisplay": self = .centerCursorOnBuiltInDisplay
         case "rules.toggle", "toggleRules": self = .toggleRules
         default: self = .unknown(identifier)
         }
@@ -747,6 +756,9 @@ enum SystemAction: Codable, Hashable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         switch self {
+        case .builtInBrightnessOff: try container.encode("display.brightness.off")
+        case .builtInDisplayOn: try container.encode("display.brightness.on")
+        case .centerCursorOnBuiltInDisplay: try container.encode("display.cursor.center")
         case .toggleRules: try container.encode("rules.toggle")
         case .unknown(let identifier): try container.encode(identifier)
         }
@@ -754,8 +766,60 @@ enum SystemAction: Codable, Hashable {
 
     var name: String {
         switch self {
+        case .builtInBrightnessOff: return "MacBook display brightness: 0%"
+        case .builtInDisplayOn: return "MacBook display brightness: 45%"
+        case .centerCursorOnBuiltInDisplay: return "Center cursor on MacBook display"
         case .toggleRules: return "Toggle keys (enable/disable rules)"
         case .unknown(let identifier): return "Unsupported action: \(identifier)"
+        }
+    }
+}
+
+enum BuiltInDisplayActions {
+    // DisplayServices supports Apple Silicon's built-in backlight. Load this private
+    // API optionally so an OS change cannot prevent KeyChanger from launching.
+    private typealias SetBrightness = @convention(c) (UInt32, Float) -> Int32
+    private static let framework = dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_LAZY | RTLD_LOCAL)
+    private static let setBrightness: SetBrightness? = {
+        guard let framework, let symbol = dlsym(framework, "DisplayServicesSetBrightness") else { return nil }
+        return unsafeBitCast(symbol, to: SetBrightness.self)
+    }()
+
+    static func displayID() -> CGDirectDisplayID? {
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return nil }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetOnlineDisplayList(count, &displays, &count) == .success else { return nil }
+        return displays.prefix(Int(count)).first { CGDisplayIsBuiltin($0) != 0 && CGDisplayIsActive($0) != 0 }
+    }
+
+    static func perform(_ action: SystemAction) {
+        if case .unknown = action { return }
+        guard action != .toggleRules else { return }
+        // Keep display work outside the event-tap callback.
+        DispatchQueue.main.async {
+            guard let display = displayID() else {
+                NSSound.beep()
+                return
+            }
+            switch action {
+            case .builtInBrightnessOff, .builtInDisplayOn:
+                let brightness: Float = action == .builtInBrightnessOff ? 0 : 0.45
+                guard let setBrightness, setBrightness(display, brightness) == 0 else {
+                    NSSound.beep()
+                    return
+                }
+            case .centerCursorOnBuiltInDisplay:
+                // Quartz bounds use global coordinates, including negative origins
+                // and Retina scaling, regardless of which display is primary.
+                let bounds = CGDisplayBounds(display)
+                guard !bounds.isEmpty else { return }
+                CGAssociateMouseAndMouseCursorPosition(1)
+                if CGWarpMouseCursorPosition(CGPoint(x: bounds.midX, y: bounds.midY)) != .success {
+                    NSSound.beep()
+                }
+            case .toggleRules, .unknown: break
+            }
         }
     }
 }
@@ -894,6 +958,9 @@ extension NavigationAction {
     // Predefined navigation actions - optimized for Windows switchers
     static let all: [NavigationAction] = [
         NavigationAction(name: SystemAction.toggleRules.name, key: 0, modifiers: [], systemAction: .toggleRules),
+        NavigationAction(name: SystemAction.builtInBrightnessOff.name, key: 0, modifiers: [], systemAction: .builtInBrightnessOff),
+        NavigationAction(name: SystemAction.builtInDisplayOn.name, key: 0, modifiers: [], systemAction: .builtInDisplayOn),
+        NavigationAction(name: SystemAction.centerCursorOnBuiltInDisplay.name, key: 0, modifiers: [], systemAction: .centerCursorOnBuiltInDisplay),
 
         // === SPECIAL (block key - targetKeyCode 0 with no modifiers means discard) ===
         NavigationAction(name: "🚫 Discard (block key)", key: 0, modifiers: []),
@@ -1309,7 +1376,7 @@ class KeyMappingManager: ObservableObject {
             }
             if let action = mapping.systemAction {
                 guard mapping.type == .navigation,
-                      allowUnknownActions || action == .toggleRules else {
+                      allowUnknownActions || SystemAction.allCases.contains(action) else {
                     throw MappingFileError.invalidRule
                 }
             }
@@ -2105,7 +2172,7 @@ struct AddMappingSheet: View {
     // Optional: if editing an existing mapping
     var editingMapping: KeyMappingRule?
     
-    @State private var mappingType: MappingType = .navigation
+    @State private var mappingType: MappingType = .simpleKey
     @State private var fromKey = ""
     @State private var fromKeyCode: UInt16 = 0
     @State private var fromModifiers: CGEventFlags?
@@ -2951,12 +3018,16 @@ class KeyRemapper {
     }
 
     private func performSystemAction(_ action: SystemAction) {
-        guard action == .toggleRules else { return }
-        DispatchQueue.main.async { [weak self] in
-            self?.onToggleRules()
+        if action == .toggleRules {
+            // Change state after process() completes, outside its mutating access.
+            DispatchQueue.main.async { [weak self] in
+                self?.onToggleRules()
+            }
+        } else {
+            BuiltInDisplayActions.perform(action)
         }
     }
-    
+
     func startRemapping() {
         guard AXIsProcessTrusted() else {
             print("❌ Accessibility permission not granted")
