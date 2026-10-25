@@ -1715,6 +1715,55 @@ struct MappingRow: View {
 }
 
 // MARK: - Add Mapping Sheet
+private struct AppFilterPicker: NSViewRepresentable {
+    @Binding var selection: AppFilterMode
+    var width: CGFloat
+
+    private static let modes: [AppFilterMode] = [.all, .exclude, .include]
+    private var labels: [String] {
+        [L10n.current.filterAllApps, L10n.current.filterExclude, L10n.current.filterInclude]
+    }
+
+    func makeNSView(context: Context) -> NSSegmentedControl {
+        let control = NSSegmentedControl(labels: labels, trackingMode: .selectOne,
+                                         target: context.coordinator, action: #selector(Coordinator.selectFilter(_:)))
+        control.segmentDistribution = .fillProportionally
+        control.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        control.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return control
+    }
+
+    func updateNSView(_ control: NSSegmentedControl, context: Context) {
+        context.coordinator.selection = $selection
+        for (index, label) in labels.enumerated() {
+            control.setLabel(label, forSegment: index)
+        }
+        control.selectedSegment = Self.modes.firstIndex(of: selection) ?? 0
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSSegmentedControl, context: Context) -> CGSize? {
+        // Keep the native control's width stable when the form or window focus changes.
+        CGSize(width: width, height: nsView.intrinsicContentSize.height)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(selection: $selection)
+    }
+
+    final class Coordinator: NSObject {
+        var selection: Binding<AppFilterMode>
+
+        init(selection: Binding<AppFilterMode>) {
+            self.selection = selection
+        }
+
+        @objc func selectFilter(_ control: NSSegmentedControl) {
+            guard AppFilterPicker.modes.indices.contains(control.selectedSegment) else { return }
+            selection.wrappedValue = AppFilterPicker.modes[control.selectedSegment]
+        }
+    }
+}
+
 struct AddMappingSheet: View {
     @ObservedObject var manager: KeyMappingManager
     @ObservedObject var appsManager: RunningAppsManager
@@ -1744,6 +1793,26 @@ struct AddMappingSheet: View {
     @State private var appFilterMode: AppFilterMode = .all
     @State private var selectedAppBundleIDs: Set<String> = []
     
+    private enum Layout {
+        static let formWidth: CGFloat = 500
+        static let keyboardWidth: CGFloat = 480
+        static let dividerWidth: CGFloat = 1
+        static let sheetHeight: CGFloat = 520
+        static let formPadding: CGFloat = 16
+        static let sectionPadding: CGFloat = 12
+        static let columnSpacing: CGFloat = 16
+        static let arrowWidth: CGFloat = 24
+        static let keyFieldHeight: CGFloat = 60
+        static let controlRowHeight: CGFloat = 24
+        static let contentWidth = formWidth - 2 * formPadding
+        static let sectionContentWidth = contentWidth - 2 * sectionPadding
+        static let keyColumnWidth = (sectionContentWidth - arrowWidth - 2 * columnSpacing) / 2
+    }
+
+    private var sheetWidth: CGFloat {
+        Layout.formWidth + (showVisualKeyboard ? Layout.dividerWidth + Layout.keyboardWidth : 0)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -1779,18 +1848,22 @@ struct AddMappingSheet: View {
                                     .tag(MappingType.navigation)
                             }
                             .pickerStyle(.segmented)
+                            .frame(width: Layout.contentWidth)
                             .disabled(editingMapping != nil)
                         }
                         
-                        // Key Mapping Area
-                        HStack(spacing: 16) {
-                            // FROM Key
-                            VStack(spacing: 8) {
+                        // Shared rows keep labels, key fields, and controls aligned across rule types.
+                        Grid(horizontalSpacing: Layout.columnSpacing, verticalSpacing: 8) {
+                            GridRow {
                                 Text(L10n.current.source)
-                                    .font(.caption)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.secondary)
-                                
+                                Color.clear.frame(width: Layout.arrowWidth, height: 0)
+                                Text(L10n.current.target)
+                            }
+                            .font(.caption)
+                            .fontWeight(.bold)
+                            .foregroundColor(.secondary)
+
+                            GridRow {
                                 ZStack {
                                     RoundedRectangle(cornerRadius: 10)
                                         .fill(isCapturingFrom ? Color.red.opacity(0.1) : Color.blue.opacity(0.1))
@@ -1798,7 +1871,7 @@ struct AddMappingSheet: View {
                                             RoundedRectangle(cornerRadius: 10)
                                                 .strokeBorder(isCapturingFrom ? Color.red : Color.blue, lineWidth: 2)
                                         )
-                                    
+
                                     VStack(spacing: 4) {
                                         if fromKey.isEmpty {
                                             Image(systemName: "keyboard")
@@ -1815,157 +1888,153 @@ struct AddMappingSheet: View {
                                     }
                                     .padding(8)
                                 }
-                                .frame(height: 60)
+                                .frame(width: Layout.keyColumnWidth, height: Layout.keyFieldHeight)
                                 .onTapGesture {
                                     isCapturingFrom = true
                                     isCapturingTo = false
                                 }
-                                
-                                if !fromKey.isEmpty {
-                                    Button(action: { 
-                                        fromKey = ""
-                                        fromKeyCode = 0
-                                        fromModifiers = nil
-                                    }) {
-                                        Label(L10n.current.clear, systemImage: "xmark.circle")
-                                            .font(.caption2)
-                                    }
-                                    .buttonStyle(.borderless)
-                                    .foregroundColor(.red)
-                                }
-                            }
-                            .frame(maxWidth: .infinity)
-                            
-                            // Arrow
-                            Image(systemName: "arrow.right.circle.fill")
-                                .font(.system(size: 24))
-                                .foregroundColor(.green)
-                                .padding(.top, 20)
-                            
-                            // TO Key
-                            VStack(spacing: 8) {
-                                Text(L10n.current.target)
-                                    .font(.caption)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.secondary)
-                                
-                                if mappingType == .simpleKey {
-                                    ZStack {
-                                        RoundedRectangle(cornerRadius: 10)
-                                            .fill(isCapturingTo ? Color.red.opacity(0.1) : Color.green.opacity(0.1))
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 10)
-                                                    .strokeBorder(isCapturingTo ? Color.red : Color.green, lineWidth: 2)
-                                            )
-                                        
-                                        VStack(spacing: 4) {
-                                            if toKey.isEmpty {
-                                                Image(systemName: "keyboard")
-                                                    .font(.title2)
-                                                    .foregroundColor(.secondary)
-                                                Text(isCapturingTo ? L10n.current.pressKey : L10n.current.clickHere)
-                                                    .font(.caption2)
-                                                    .foregroundColor(.secondary)
-                                            } else {
-                                                Text(toKey)
-                                                    .font(.system(size: 16, weight: .bold, design: .rounded))
-                                                    .foregroundColor(.primary)
+
+                                Image(systemName: "arrow.right.circle.fill")
+                                    .font(.system(size: Layout.arrowWidth))
+                                    .foregroundColor(.green)
+                                    .frame(width: Layout.arrowWidth)
+
+                                Group {
+                                    if mappingType == .simpleKey {
+                                        ZStack {
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .fill(isCapturingTo ? Color.red.opacity(0.1) : Color.green.opacity(0.1))
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 10)
+                                                        .strokeBorder(isCapturingTo ? Color.red : Color.green, lineWidth: 2)
+                                                )
+
+                                            VStack(spacing: 4) {
+                                                if toKey.isEmpty {
+                                                    Image(systemName: "keyboard")
+                                                        .font(.title2)
+                                                        .foregroundColor(.secondary)
+                                                    Text(isCapturingTo ? L10n.current.pressKey : L10n.current.clickHere)
+                                                        .font(.caption2)
+                                                        .foregroundColor(.secondary)
+                                                } else {
+                                                    Text(toKey)
+                                                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                                                        .foregroundColor(.primary)
+                                                }
                                             }
+                                            .padding(8)
                                         }
-                                        .padding(8)
-                                    }
-                                    .frame(height: 60)
-                                    .onTapGesture {
-                                        isCapturingTo = true
-                                        isCapturingFrom = false
-                                    }
-                                    
-                                    HStack(spacing: 8) {
-                                        // Visual Keyboard Toggle Button
-                                        Button(action: { 
-                                            showVisualKeyboard.toggle()
-                                            isCapturingTo = false
+                                        .onTapGesture {
+                                            isCapturingTo = true
                                             isCapturingFrom = false
-                                        }) {
-                                            Image(systemName: showVisualKeyboard ? "keyboard.fill" : "keyboard")
-                                                .font(.caption)
                                         }
-                                        .buttonStyle(.bordered)
-                                        .tint(showVisualKeyboard ? .blue : .gray)
-                                        .help(L10n.current.showKeyboard)
-                                        
-                                        if !toKey.isEmpty {
-                                            Button(action: { 
-                                                toKey = ""
-                                                toKeyCode = 0
+                                    } else {
+                                        ZStack {
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .fill(Color.purple.opacity(0.1))
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 10)
+                                                        .strokeBorder(Color.purple, lineWidth: 2)
+                                                )
+
+                                            VStack(spacing: 4) {
+                                                if let action = selectedNavigationAction {
+                                                    Image(systemName: "checkmark.circle.fill")
+                                                        .font(.title2)
+                                                        .foregroundColor(.green)
+                                                    Text(action.name)
+                                                        .font(.system(size: 11, weight: .semibold))
+                                                        .multilineTextAlignment(.center)
+                                                        .lineLimit(2)
+                                                } else {
+                                                    Image(systemName: "list.bullet")
+                                                        .font(.title2)
+                                                        .foregroundColor(.secondary)
+                                                    Text(L10n.current.selectAction)
+                                                        .font(.caption2)
+                                                        .foregroundColor(.secondary)
+                                                }
+                                            }
+                                            .padding(8)
+                                        }
+                                    }
+                                }
+                                .frame(width: Layout.keyColumnWidth, height: Layout.keyFieldHeight)
+                            }
+
+                            GridRow {
+                                HStack {
+                                    if !fromKey.isEmpty {
+                                        Button(action: {
+                                            fromKey = ""
+                                            fromKeyCode = 0
+                                            fromModifiers = nil
+                                        }) {
+                                            Label(L10n.current.clear, systemImage: "xmark.circle")
+                                                .font(.caption2)
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .foregroundColor(.red)
+                                    }
+                                }
+                                .frame(width: Layout.keyColumnWidth, height: Layout.controlRowHeight)
+
+                                Color.clear.frame(width: Layout.arrowWidth, height: 0)
+
+                                Group {
+                                    if mappingType == .simpleKey {
+                                        HStack(spacing: 8) {
+                                            // Visual Keyboard Toggle Button
+                                            Button(action: {
+                                                showVisualKeyboard.toggle()
+                                                isCapturingTo = false
+                                                isCapturingFrom = false
                                             }) {
-                                                Image(systemName: "xmark.circle")
+                                                Image(systemName: showVisualKeyboard ? "keyboard.fill" : "keyboard")
                                                     .font(.caption)
                                             }
-                                            .buttonStyle(.borderless)
-                                            .foregroundColor(.red)
-                                        }
-                                    }
-                                } else {
-                                    // Navigation action picker
-                                    ZStack {
-                                        RoundedRectangle(cornerRadius: 10)
-                                            .fill(Color.purple.opacity(0.1))
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 10)
-                                                    .strokeBorder(Color.purple, lineWidth: 2)
-                                            )
-                                        
-                                        VStack(spacing: 4) {
-                                            if let action = selectedNavigationAction {
-                                                Image(systemName: "checkmark.circle.fill")
-                                                    .font(.title2)
-                                                    .foregroundColor(.green)
-                                                Text(action.name)
-                                                    .font(.system(size: 11, weight: .semibold))
-                                                    .multilineTextAlignment(.center)
-                                                    .lineLimit(2)
-                                            } else {
-                                                Image(systemName: "list.bullet")
-                                                    .font(.title2)
-                                                    .foregroundColor(.secondary)
-                                                Text(L10n.current.selectAction)
-                                                    .font(.caption2)
-                                                    .foregroundColor(.secondary)
+                                            .buttonStyle(.bordered)
+                                            .tint(showVisualKeyboard ? .blue : .gray)
+                                            .help(L10n.current.showKeyboard)
+
+                                            if !toKey.isEmpty {
+                                                Button(action: {
+                                                    toKey = ""
+                                                    toKeyCode = 0
+                                                }) {
+                                                    Image(systemName: "xmark.circle")
+                                                        .font(.caption)
+                                                }
+                                                .buttonStyle(.borderless)
+                                                .foregroundColor(.red)
                                             }
                                         }
-                                        .padding(8)
-                                    }
-                                    .frame(height: 60)
-                                    
-                                    Picker("", selection: $selectedNavigationAction) {
-                                        Text(L10n.current.select).tag(nil as NavigationAction?)
-                                        ForEach(NavigationAction.all) { action in
-                                            Text(action.localizedName).tag(action as NavigationAction?)
+                                    } else {
+                                        Picker("", selection: $selectedNavigationAction) {
+                                            Text(L10n.current.select).tag(nil as NavigationAction?)
+                                            ForEach(NavigationAction.all) { action in
+                                                Text(action.localizedName).tag(action as NavigationAction?)
+                                            }
                                         }
+                                        .labelsHidden()
                                     }
-                                    .labelsHidden()
                                 }
+                                .frame(width: Layout.keyColumnWidth, height: Layout.controlRowHeight)
                             }
-                            .frame(maxWidth: .infinity)
                         }
-                        .padding(12)
+                        .padding(Layout.sectionPadding)
                         .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
                         .cornerRadius(10)
-                        
+
                         // Per-App Filter Section
                         VStack(alignment: .leading, spacing: 8) {
                             Text(L10n.current.appFilter)
                                 .font(.headline)
                                 .foregroundColor(.secondary)
                             
-                            Picker("", selection: $appFilterMode) {
-                                Label(L10n.current.filterAllApps, systemImage: "square.stack.3d.up").tag(AppFilterMode.all)
-                                Label(L10n.current.filterExclude, systemImage: "minus.circle").tag(AppFilterMode.exclude)
-                                Label(L10n.current.filterInclude, systemImage: "checkmark.circle").tag(AppFilterMode.include)
-                            }
-                            .pickerStyle(.segmented)
-                            
+                            AppFilterPicker(selection: $appFilterMode, width: Layout.sectionContentWidth)
+
                             if appFilterMode != .all {
                                 VStack(alignment: .leading, spacing: 6) {
                                     HStack {
@@ -2022,18 +2091,20 @@ struct AddMappingSheet: View {
                                 .cornerRadius(8)
                             }
                         }
-                        .padding(12)
+                        .padding(Layout.sectionPadding)
                         .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
                         .cornerRadius(10)
                     }
-                    .padding(16)
+                    .frame(width: Layout.contentWidth)
+                    .padding(Layout.formPadding)
                 }
-                .frame(minWidth: 400)
+                .frame(width: Layout.formWidth)
                 
-                // RIGHT SIDE: Visual Keyboard (only for simpleKey mode when toggled)
-                if showVisualKeyboard && mappingType == .simpleKey {
+                // Keep the side panel open across rule types so switching does not resize the sheet.
+                if showVisualKeyboard {
                     Divider()
-                    
+                        .frame(width: Layout.dividerWidth)
+
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text(L10n.current.clickToSelect)
@@ -2046,24 +2117,26 @@ struct AddMappingSheet: View {
                             }
                             .buttonStyle(.plain)
                         }
-                        
+
                         VisualKeyboardView(
                             selectedKeyCode: $toKeyCode,
                             selectedKeyName: $toKey,
                             selectedCharacter: $toCharacter,
                             onKeySelected: nil
                         )
-                        
+                        .disabled(mappingType != .simpleKey)
+                        .opacity(mappingType == .simpleKey ? 1 : 0.5)
+
                         Spacer()
                     }
                     .padding(12)
-                    .frame(width: 480)
+                    .frame(width: Layout.keyboardWidth)
                     .background(Color(NSColor.windowBackgroundColor))
                 }
             }
-            
+
             Divider()
-            
+
             // Action Buttons
             HStack(spacing: 16) {
                 Button(action: { isPresented = false }) {
@@ -2083,7 +2156,7 @@ struct AddMappingSheet: View {
             }
             .padding(16)
         }
-        .frame(width: showVisualKeyboard && mappingType == .simpleKey ? 920 : 500, height: 520)
+        .frame(width: sheetWidth, height: Layout.sheetHeight)
         .animation(.easeInOut(duration: 0.2), value: showVisualKeyboard)
         .onAppear {
             // Suspend remapping to capture original keys, not remapped ones
