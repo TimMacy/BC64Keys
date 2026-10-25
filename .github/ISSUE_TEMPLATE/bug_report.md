@@ -12,9 +12,9 @@ assignees: ''
 
 ## Steps to Reproduce
 <!-- Steps to reproduce the behavior -->
-1. 
-2. 
-3. 
+1.
+2.
+3.
 
 ## Expected Behavior
 <!-- What should happen -->
@@ -52,6 +52,6 @@ Paste logs here
 
 ## Checklist
 - [ ] I have checked existing issues for duplicates
-- [ ] I am using the latest version from [Releases](https://github.com/badcode64/BC64Keys/releases)
+- [ ] I am using the latest version from [Releases](https://github.com/TimMacy/BC64Keys/releases)
 - [ ] I have verified the app is properly signed: `codesign -vv /Applications/BC64Keys.app`
 - [ ] I have tried restarting the app and/or my Mac

@@ -37,7 +37,7 @@ If you discover a security vulnerability, please report it privately:
 
 ### Preferred Method: GitHub Security Advisories
 
-1. Go to the [Security Advisories](https://github.com/badcode64/BC64Keys/security/advisories) page
+1. Go to the [Security Advisories](https://github.com/TimMacy/BC64Keys/security/advisories) page
 2. Click **"Report a vulnerability"**
 3. Fill out the form with:
    - Description of the vulnerability
@@ -71,7 +71,7 @@ Do not use public issues or email for security reports.
 ### ✅ Verify App Authenticity
 
 Always download BC64Keys from:
-- ✅ **Official GitHub Releases:** https://github.com/badcode64/BC64Keys/releases
+- ✅ **Official GitHub Releases:** https://github.com/TimMacy/BC64Keys/releases
 - ❌ **NOT from third-party sites**
 
 ### ✅ Check Code Signature
@@ -159,5 +159,5 @@ We appreciate responsible disclosure. Security researchers who report valid vuln
 
 ---
 
-**Last Updated:** 2026-08-23  
-**Contact:** [GitHub Security Advisories](https://github.com/badcode64/BC64Keys/security/advisories)
+**Last Updated:** 2026-08-23
+**Contact:** [GitHub Security Advisories](https://github.com/TimMacy/BC64Keys/security/advisories)

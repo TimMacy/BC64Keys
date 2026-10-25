@@ -380,6 +380,36 @@ class L10n: ObservableObject {
         tr(["en": "If you like this app, buy me a coffee! ☕", "hu": "Ha tetszik az app, támogass egy kávéval! ☕", "de": "Wenn Ihnen diese App gefällt, spendieren Sie mir einen Kaffee! ☕", "fr": "Si vous aimez cette app, offrez-moi un café! ☕",
             "es": "¡Si te gusta esta app, cómprame un café! ☕", "it": "Se ti piace questa app, offrimi un caffè! ☕", "ja": "このアプリが気に入ったら、コーヒーをおごってください！ ☕", "zh": "如果您喜欢这个应用，请给我买杯咖啡！ ☕"])
     }
+    var enableRules: String {
+        tr(["en": "Enable rules",
+            "zh": "启用规则",
+            "ja": "ルールを有効にする",
+            "ko": "규칙 활성화"])
+    }
+    var enableRulesHint: String {
+        tr(["en": "Turn off to pause key mappings. Turn on to resume previously enabled rules. Each rule keeps its individual enabled state. Shortcuts that toggle rules still work while paused.",
+            "zh": "关闭以暂停按键映射，开启以恢复之前启用的规则。每条规则保留其单独的启用状态。切换规则开关的快捷键在暂停期间仍可使用。",
+            "ja": "無効にするとキーの割り当てを一時停止します。有効にすると以前有効だったルールを再開します。各ルールの個別の有効状態は保持されます。ルールを切り替えるショートカットは一時停止中も使用できます。",
+            "ko": "끄면 키 매핑이 일시 중지됩니다. 켜면 이전에 활성화된 규칙이 다시 적용됩니다. 각 규칙의 개별 활성화 상태는 유지됩니다. 규칙을 켜고 끄는 단축키는 일시 중지 중에도 작동합니다."])
+    }
+    var clearAllRules: String {
+        tr(["en": "Clear All Rules",
+            "zh": "清除所有规则",
+            "ja": "すべてのルールを削除",
+            "ko": "모든 규칙 삭제"])
+    }
+    var clearAllRulesTitle: String {
+        tr(["en": "Clear all saved rules?",
+            "zh": "清除所有已保存的规则？",
+            "ja": "保存されたすべてのルールを削除しますか？",
+            "ko": "저장된 모든 규칙을 삭제할까요?"])
+    }
+    var clearAllRulesMessage: String {
+        tr(["en": "This permanently deletes all saved rules, including disabled rules. This can't be undone. Other settings won't change.",
+            "zh": "这将永久删除所有已保存的规则，包括已禁用的规则。此操作无法撤销。其他设置不会改变。",
+            "ja": "無効なルールを含むすべての保存済みルールを完全に削除します。この操作は取り消せません。他の設定は変更されません。",
+            "ko": "비활성화된 규칙을 포함하여 저장된 모든 규칙을 영구적으로 삭제합니다. 이 작업은 되돌릴 수 없습니다. 다른 설정은 변경되지 않습니다."])
+    }
     var supportButton: String {
         tr(["en": "Buy Me a Coffee", "hu": "Támogatom", "de": "Spendiere einen Kaffee", "fr": "Offrir un café",
             "es": "Cómprame un café", "it": "Offrimi un caffè", "ja": "コーヒーをおごる", "zh": "给我买杯咖啡"])
@@ -429,6 +459,18 @@ class L10n: ObservableObject {
             "nl": "Alleen geselecteerde applicaties", "pt": "Somente aplicativos selecionados", "sv": "Endast valda program", "da": "Kun valgte programmer",
             "fi": "Vain valitut sovellukset", "pl": "Tylko wybrane aplikacje", "cs": "Pouze vybrané aplikace", "sk": "Iba vybraté aplikácie",
             "ro": "Doar aplicațiile selectate", "el": "Μόνο επιλεγμένες εφαρμογές", "ko": "선택한 응용 프로그램만", "ar": "التطبيقات المحددة فقط", "he": "רק יישומים נבחרים", "tr": "Yalnızca seçilen uygulamalar"])
+    }
+    var selectApplicationRequired: String {
+        tr(["en": "Select at least one application, or choose All applications.",
+            "zh": "请至少选择一个应用程序，或选择所有应用程序。",
+            "ja": "アプリケーションを1つ以上選択するか、すべてのアプリケーションを選択してください。",
+            "ko": "응용 프로그램을 하나 이상 선택하거나 모든 응용 프로그램을 선택하세요."])
+    }
+    var keyAlreadyAssigned: String {
+        tr(["en": "This key combination is already assigned to another rule with overlapping applications.",
+            "zh": "此按键组合已分配给另一个应用范围重叠的规则。",
+            "ja": "このキーの組み合わせは、対象アプリケーションが重複する別のルールにすでに割り当てられています。",
+            "ko": "이 키 조합은 적용되는 응용 프로그램이 겹치는 다른 규칙에 이미 할당되어 있습니다."])
     }
     var runningApps: String {
         tr(["en": "Running Applications", "hu": "Futó alkalmazások", "de": "Laufende Anwendungen", "fr": "Applications en cours d'exécution",
