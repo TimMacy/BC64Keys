@@ -36,7 +36,7 @@ jobs:
         id: package
         run: |
           version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' BC64Keys.app/Contents/Info.plist)"
-          tag="v${version}-build.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          tag="v${version}"
           asset="BC64Keys-${tag}-macOS-universal.zip"
           ditto -c -k --sequesterRsrc --keepParent BC64Keys.app "$asset"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -53,6 +53,6 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" "$RELEASE_ASSET" \
             --target "$GITHUB_SHA" \
-            --title "BC64Keys $RELEASE_VERSION (build $GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT)" \
+            --title "BC64Keys v$RELEASE_VERSION" \
             --generate-notes \
             --latest

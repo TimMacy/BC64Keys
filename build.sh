@@ -81,7 +81,7 @@ cat > BC64Keys.app/Contents/Info.plist << 'EOF'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.9.2</string>
+    <string>1.10</string>
     <key>CFBundleVersion</key>
     <string>12</string>
     <key>CFBundleIconFile</key>
