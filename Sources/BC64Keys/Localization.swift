@@ -430,6 +430,18 @@ class L10n: ObservableObject {
             "fi": "Vain valitut sovellukset", "pl": "Tylko wybrane aplikacje", "cs": "Pouze vybrané aplikace", "sk": "Iba vybraté aplikácie",
             "ro": "Doar aplicațiile selectate", "el": "Μόνο επιλεγμένες εφαρμογές", "ko": "선택한 응용 프로그램만", "ar": "التطبيقات المحددة فقط", "he": "רק יישומים נבחרים", "tr": "Yalnızca seçilen uygulamalar"])
     }
+    var selectApplicationRequired: String {
+        tr(["en": "Select at least one application, or choose All applications.",
+            "zh": "请至少选择一个应用程序，或选择所有应用程序。",
+            "ja": "アプリケーションを1つ以上選択するか、すべてのアプリケーションを選択してください。",
+            "ko": "응용 프로그램을 하나 이상 선택하거나 모든 응용 프로그램을 선택하세요."])
+    }
+    var keyAlreadyAssigned: String {
+        tr(["en": "This key combination is already assigned to another rule with overlapping applications.",
+            "zh": "此按键组合已分配给另一个应用范围重叠的规则。",
+            "ja": "このキーの組み合わせは、対象アプリケーションが重複する別のルールにすでに割り当てられています。",
+            "ko": "이 키 조합은 적용되는 응용 프로그램이 겹치는 다른 규칙에 이미 할당되어 있습니다."])
+    }
     var runningApps: String {
         tr(["en": "Running Applications", "hu": "Futó alkalmazások", "de": "Laufende Anwendungen", "fr": "Applications en cours d'exécution",
             "es": "Aplicaciones en ejecución", "it": "Applicazioni in esecuzione", "ja": "実行中のアプリケーション", "zh": "正在运行的应用程序",

@@ -1078,6 +1078,35 @@ class KeyMappingManager: ObservableObject {
         }
     }
     
+    func validationMessage(sourceKeyCode: UInt16?, sourceModifiers: CGEventFlags?,
+                           appFilterMode: AppFilterMode, filteredApps: Set<String>, excluding id: UUID? = nil) -> String? {
+        guard appFilterMode == .all || !filteredApps.isEmpty else {
+            return L10n.current.selectApplicationRequired
+        }
+        guard let sourceKeyCode else { return nil }
+        let userFlags: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand]
+        let modifiers = (sourceModifiers ?? []).intersection(userFlags)
+        let conflict = mappings.contains { mapping in
+            guard mapping.id != id, mapping.sourceKeyCode == sourceKeyCode else { return false }
+            guard mapping.appFilterMode != .include || !mapping.filteredApps.isEmpty else { return false }
+            let standaloneModifier = [54, 55, 56, 58, 59, 60, 61, 62].contains(sourceKeyCode) && (sourceModifiers == nil || mapping.sourceModifiers == nil)
+            guard standaloneModifier || modifiers == (mapping.sourceModifiers ?? []).intersection(userFlags) else { return false }
+
+            let apps = Set(mapping.filteredApps)
+            switch (appFilterMode, mapping.appFilterMode) {
+            case (.all, _), (_, .all), (.exclude, .exclude):
+                return true
+            case (.include, .include):
+                return !filteredApps.isDisjoint(with: apps)
+            case (.include, .exclude):
+                return !filteredApps.isSubset(of: apps)
+            case (.exclude, .include):
+                return !apps.isSubset(of: filteredApps)
+            }
+        }
+        return conflict ? L10n.current.keyAlreadyAssigned : nil
+    }
+
     func deleteMapping(_ mapping: KeyMappingRule) {
         mappings.removeAll { $0.id == mapping.id }
     }
@@ -2064,6 +2093,15 @@ struct AddMappingSheet: View {
             
             Divider()
             
+            if let validationMessage {
+                Text(validationMessage)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+            }
+
             // Action Buttons
             HStack(spacing: 16) {
                 Button(action: { isPresented = false }) {
@@ -2128,12 +2166,18 @@ struct AddMappingSheet: View {
 
     }
     
+    private var validationMessage: String? {
+        manager.validationMessage(sourceKeyCode: fromKey.isEmpty ? nil : fromKeyCode, sourceModifiers: fromModifiers,
+                                  appFilterMode: appFilterMode, filteredApps: selectedAppBundleIDs, excluding: editingMapping?.id)
+    }
+
     private var canSave: Bool {
-        // If editing, always allow save (just changing app filter for example)
+        guard validationMessage == nil else { return false }
+        // Existing mappings can save changes to just the app filter.
         if editingMapping != nil {
             return !fromKey.isEmpty
         }
-        
+
         // For new mappings, require both keys
         guard !fromKey.isEmpty else { return false }
         if mappingType == .simpleKey {
@@ -2142,8 +2186,9 @@ struct AddMappingSheet: View {
             return selectedNavigationAction != nil
         }
     }
-    
+
     private func saveMapping() {
+        guard canSave else { return }
         if mappingType == .simpleKey {
             let mapping = KeyMappingRule(
                 type: .simpleKey,
