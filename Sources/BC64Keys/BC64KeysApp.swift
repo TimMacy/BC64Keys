@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Carbon
 import ServiceManagement
+import UniformTypeIdentifiers
 
 // BC64Keys
 // -------
@@ -1108,28 +1109,79 @@ struct KeyMappingRule: Identifiable, Codable {
 }
 
 // MARK: - Key Mapping Manager
-class KeyMappingManager: ObservableObject {
-    @Published var mappings: [KeyMappingRule] = [] {
-        didSet {
-            saveMappings()
+private struct MappingFile: Codable {
+    let version: Int
+    let mappings: [KeyMappingRule]
+
+    private enum CodingKeys: String, CodingKey { case version, mappings }
+    private enum RuleKeys: String, CodingKey { case systemAction }
+
+    init(version: Int, mappings: [KeyMappingRule]) {
+        self.version = version
+        self.mappings = mappings
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        mappings = try container.decode([KeyMappingRule].self, forKey: .mappings)
+        // Reject actions this version cannot execute instead of silently importing a different rule.
+        var rules = try container.nestedUnkeyedContainer(forKey: .mappings)
+        while !rules.isAtEnd {
+            let rule = try rules.nestedContainer(keyedBy: RuleKeys.self)
+            if rule.contains(.systemAction), try !rule.decodeNil(forKey: .systemAction) {
+                throw MappingFileError.invalidRule
+            }
         }
     }
-    
+}
+
+enum MappingFileError: LocalizedError {
+    case unsupportedVersion
+    case invalidRule
+    case duplicateRule
+    case unreadableSavedRules
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedVersion: return "This rules file uses an unsupported version."
+        case .invalidRule: return "The rules file contains an invalid or unsupported rule. Nothing was imported."
+        case .duplicateRule: return "The rules file contains duplicate rule IDs. Nothing was imported."
+        case .unreadableSavedRules: return "Saved rules couldn't be loaded. Import a valid rules file before exporting or changing rules."
+        }
+    }
+}
+
+class KeyMappingManager: ObservableObject {
+    private var isLoading = false
+    @Published var mappings: [KeyMappingRule] = [] {
+        didSet {
+            if !isLoading { saveMappings() }
+        }
+    }
+    @Published private(set) var loadError: String?
+    @Published private(set) var importedFileName: String?
+
     private let userDefaultsKey = "bc64keys.mappings"
+    private let importedFileNameKey = "bc64keys.importedFileName"
+    private let defaults: UserDefaults
 
     // Persistence model:
     // - mappings[] is JSON-encoded into UserDefaults on every change (didSet)
     // - keep the structure stable for backwards compatibility (Codable)
-    
-    init() {
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         loadMappings()
     }
-    
+
     func addMapping(_ mapping: KeyMappingRule) {
+        guard loadError == nil else { return }
         mappings.append(mapping)
     }
-    
+
     func updateMapping(_ oldMapping: KeyMappingRule, with newMapping: KeyMappingRule) {
+        guard loadError == nil else { return }
         if let index = mappings.firstIndex(where: { $0.id == oldMapping.id }) {
             var updated = newMapping
             updated.id = oldMapping.id  // Keep the same ID
@@ -1137,55 +1189,77 @@ class KeyMappingManager: ObservableObject {
             mappings[index] = updated
         }
     }
-    
+
     func deleteMapping(_ mapping: KeyMappingRule) {
+        guard loadError == nil else { return }
         mappings.removeAll { $0.id == mapping.id }
     }
-    
+
     func toggleMapping(_ mapping: KeyMappingRule) {
+        guard loadError == nil else { return }
         if let index = mappings.firstIndex(where: { $0.id == mapping.id }) {
             mappings[index].isEnabled.toggle()
         }
     }
-    
+
+    func exportData() throws -> Data {
+        guard loadError == nil else { throw MappingFileError.unreadableSavedRules }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(MappingFile(version: 1, mappings: mappings))
+        let json = String(decoding: data, as: UTF8.self)
+        let formatted = json.replacingOccurrences(of: #"(?m)^([ \t]*"[^"]+") : "#, with: "$1: ", options: .regularExpression)
+        let compactArrays = formatted.replacingOccurrences(of: #"(?m)^([ \t]*"[^"]+": )\[[ \t\r\n]*\]"#, with: "$1[]", options: .regularExpression)
+        return Data(compactArrays.utf8)
+    }
+
+    func importData(_ data: Data, from url: URL? = nil) throws {
+        let file = try JSONDecoder().decode(MappingFile.self, from: data)
+        guard file.version == 1 else { throw MappingFileError.unsupportedVersion }
+        try Self.validate(file.mappings)
+        loadError = nil
+        importedFileName = url?.deletingPathExtension().lastPathComponent
+        mappings = file.mappings
+    }
+
+    private static func validate(_ mappings: [KeyMappingRule]) throws {
+        guard Set(mappings.map(\.id)).count == mappings.count else { throw MappingFileError.duplicateRule }
+        for mapping in mappings {
+            guard !mapping.sourceKeyName.isEmpty, mapping.sourceKeyCode <= 255,
+                  !mapping.targetKeyName.isEmpty, mapping.targetKeyCode <= 255 else {
+                throw MappingFileError.invalidRule
+            }
+        }
+    }
+
     private func saveMappings() {
+        guard loadError == nil else { return }
         // JSON encoding for ~20 mappings is <1ms - no need for background queue
         // Background queue would add overhead and potential race conditions
         if let encoded = try? JSONEncoder().encode(mappings) {
-            UserDefaults.standard.set(encoded, forKey: userDefaultsKey)
+            defaults.set(encoded, forKey: userDefaultsKey)
+            defaults.set(importedFileName, forKey: importedFileNameKey)
         }
     }
-    
+
     private func loadMappings() {
-        guard let data = UserDefaults.standard.data(forKey: userDefaultsKey) else {
+        guard let data = defaults.data(forKey: userDefaultsKey) else {
             return
         }
-        
+
+        isLoading = true
+        defer { isLoading = false }
         do {
             let decoded = try JSONDecoder().decode([KeyMappingRule].self, from: data)
-            // Validate loaded mappings - filter out any corrupted entries
-            let validMappings = decoded.filter { mapping in
-                // Basic validation: key codes should be reasonable (0-255 for most keys)
-                // and names should not be empty
-                return !mapping.sourceKeyName.isEmpty && 
-                       mapping.sourceKeyCode <= 255 &&
-                       mapping.targetKeyCode <= 255
-            }
-            mappings = validMappings
-            
-            // Log if any mappings were filtered out
-            if validMappings.count != decoded.count {
-                #if DEBUG
-                print("⚠️ Filtered out \(decoded.count - validMappings.count) invalid mapping(s) from UserDefaults")
-                #endif
-            }
+            try Self.validate(decoded)
+            mappings = decoded
+            importedFileName = defaults.string(forKey: importedFileNameKey)
         } catch {
-            // Corrupted data - log and start fresh
+            // Preserve the original bytes so a decode failure cannot erase saved rules.
+            loadError = error.localizedDescription
             #if DEBUG
             print("❌ Failed to decode mappings from UserDefaults: \(error.localizedDescription)")
             #endif
-            // Don't crash - just start with empty mappings
-            mappings = []
         }
     }
 }
@@ -1582,18 +1656,36 @@ struct MappingView: View {
     @StateObject private var appsManager = RunningAppsManager()
     @State private var showAddSheet = false
     @State private var editingMapping: KeyMappingRule?
+    @State private var fileError: String?
     @EnvironmentObject var appDelegate: AppDelegate
-    
+
+    private var mappingTitle: String {
+        guard let fileName = mappingManager.importedFileName else { return L10n.current.mappingTitle }
+        return "\(L10n.current.mappingTitle) for \(fileName)"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Text(L10n.current.mappingTitle)
+                Text(mappingTitle)
                     .font(.title)
                     .fontWeight(.bold)
-                
+                    .lineLimit(1)
+
                 Spacer()
-                
+
+                Button(action: importRules) {
+                    Label("Import...", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.bordered)
+
+                Button(action: exportRules) {
+                    Label("Export...", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.bordered)
+                    .disabled(mappingManager.loadError != nil)
+
                 Button(action: { showAddSheet = true }) {
                     HStack {
                         Image(systemName: "plus.circle.fill")
@@ -1601,14 +1693,28 @@ struct MappingView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(mappingManager.loadError != nil)
             }
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
-            
+
             Divider()
-            
+
             // Mappings Table
-            if mappingManager.mappings.isEmpty {
+            if let loadError = mappingManager.loadError {
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.largeTitle)
+                        .foregroundColor(.orange)
+                    Text("Saved rules couldn't be loaded")
+                        .font(.headline)
+                    Text("\(loadError) The saved data is unchanged. Import a valid rules file to replace it.")
+                        .multilineTextAlignment(.center)
+                    Spacer()
+                }
+                .padding()
+            } else if mappingManager.mappings.isEmpty {
                 VStack {
                     Spacer()
                     Image(systemName: "arrow.left.arrow.right.square")
@@ -1638,8 +1744,8 @@ struct MappingView: View {
         }
         .sheet(item: $editingMapping) { mapping in
             AddMappingSheet(
-                manager: mappingManager, 
-                appsManager: appsManager, 
+                manager: mappingManager,
+                appsManager: appsManager,
                 isPresented: Binding(
                     get: { editingMapping != nil },
                     set: { if !$0 { editingMapping = nil } }
@@ -1650,6 +1756,47 @@ struct MappingView: View {
         }
         .onAppear {
             appsManager.fetchRunningApps()
+        }
+        .alert("Rules file error", isPresented: Binding(
+            get: { fileError != nil },
+            set: { if !$0 { fileError = nil } }
+        )) {
+            Button("OK") { fileError = nil }
+        } message: {
+            Text(fileError ?? "")
+        }
+    }
+
+    private func exportRules() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "BC64Keys Rules.json"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                let data = try mappingManager.exportData()
+                try data.write(to: url, options: .atomic)
+            } catch {
+                fileError = error.localizedDescription
+            }
+        }
+    }
+
+    private func importRules() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json, .folder]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            let access = url.startAccessingSecurityScopedResource()
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let data = try Data(contentsOf: url)
+                try mappingManager.importData(data, from: url)
+            } catch {
+                fileError = error.localizedDescription
+            }
         }
     }
 }
