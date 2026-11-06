@@ -1,16 +1,4 @@
-# BC64Keys 🎹
-
-**A simple, secure keyboard remapper for macOS** — the straightforward alternative to Karabiner Elements.
-
-Fork of [badcode64/BC64Keys](https://github.com/badcode64/BC64Keys), based on v1.9.2.
-
-[![Download Latest](https://img.shields.io/github/v/release/TimMacy/BC64Keys?label=Download&color=success)](https://github.com/TimMacy/BC64Keys/releases/latest)
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
-[![Platform: macOS 13+](https://img.shields.io/badge/Platform-macOS%2013%2B-lightgrey.svg)]()
-[![Swift 5](https://img.shields.io/badge/Swift-5-orange.svg)]()
-[![Notarized](https://img.shields.io/badge/Apple-Notarized-success)]()
-
-## Updates in This Fork v1.10
+# Updates in This Fork v1.10
 
 <p align="center"><img width="90%" alt="Key Mappings" src="https://github.com/user-attachments/assets/6bb25f6a-2a62-4937-9817-4aee27743d8a" /></p>
 
@@ -26,6 +14,22 @@ Fork of [badcode64/BC64Keys](https://github.com/badcode64/BC64Keys), based on v1
 Import validates the complete file before replacing the current rules. Invalid or unsupported files leave the existing rules and imported filename unchanged. Failed loading of saved data does not overwrite the original stored data.
 
 The global mapping toggle leaves individual rule settings intact. Clear All Rules deletes enabled and disabled rules after confirmation; other app settings are retained.
+
+<br>
+
+<br>
+
+# BC64Keys 🎹
+
+**A simple, secure keyboard remapper for macOS** — the straightforward alternative to Karabiner Elements.
+
+Fork of [badcode64/BC64Keys](https://github.com/badcode64/BC64Keys), based on v1.9.2.
+
+[![Download Latest](https://img.shields.io/github/v/release/TimMacy/BC64Keys?label=Download&color=success)](https://github.com/TimMacy/BC64Keys/releases/latest)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
+[![Platform: macOS 13+](https://img.shields.io/badge/Platform-macOS%2013%2B-lightgrey.svg)]()
+[![Swift 5](https://img.shields.io/badge/Swift-5-orange.svg)]()
+[![Notarized](https://img.shields.io/badge/Apple-Notarized-success)]()
 
 ## Why BC64Keys?
 
